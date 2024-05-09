@@ -51,6 +51,7 @@ from rest_framework.authtoken.models import Token
 from rest_framework.authtoken.views import ObtainAuthToken
 from rest_framework.response import Response
 from rest_framework.views import APIView
+from django.middleware.csrf import get_token
 
 
 def check_admin(user):
@@ -721,6 +722,20 @@ class PingView(ApiBaseView):
             "version": ReleaseVersion().get_local_version(),
         }
         return Response(data)
+    
+class CSRFView(APIView):
+    """resolves to /api/csrf/
+    HEAD: sets CSRF Cookie
+    """
+
+    def head(self,request):
+        """set csrf cookie"""
+        data = {}
+
+        response = Response(data)
+        response.set_cookie("csrftoken", get_token(request))
+
+        return response
 
 
 class LoginApiView(ObtainAuthToken):
