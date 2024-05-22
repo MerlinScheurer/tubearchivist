@@ -10,6 +10,7 @@ from api.src.aggs import (
     WatchProgress,
 )
 from api.src.search_processor import SearchProcess
+from django.middleware.csrf import get_token
 from home.models import CustomPeriodicTask
 from home.src.download.queue import PendingInteract
 from home.src.download.subscriptions import (
@@ -51,7 +52,6 @@ from rest_framework.authtoken.models import Token
 from rest_framework.authtoken.views import ObtainAuthToken
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from django.middleware.csrf import get_token
 
 
 def check_admin(user):
