@@ -724,6 +724,7 @@ class PingView(ApiBaseView):
         }
         return Response(data)
     
+    
 class CSRFView(APIView):
     """resolves to /api/csrf/
     HEAD: sets CSRF Cookie
