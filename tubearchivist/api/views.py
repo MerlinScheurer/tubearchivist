@@ -706,8 +706,8 @@ class DownloadApiListView(ApiBaseView):
         PendingInteract(status=query_filter).delete_by_status()
 
         return Response({"message": message})
-
-
+    
+    
 class PingView(ApiBaseView):
     """resolves to /api/ping/
     GET: test your connection
