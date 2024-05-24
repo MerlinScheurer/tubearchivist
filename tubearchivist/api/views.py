@@ -275,6 +275,10 @@ class VideoSponsorView(ApiBaseView):
         if not self.response.get("data"):
             message = {"message": "video not found"}
             return Response(message, status=404)
+        
+        if self.response["data"].get("sponsorblock") is None:
+            message = {"message": "no sponsor segment found"}
+            return Response(message, status=404)
 
         sponsorblock = self.response["data"].get("sponsorblock")
 
