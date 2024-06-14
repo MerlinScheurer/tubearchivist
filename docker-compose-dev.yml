@@ -2,7 +2,7 @@ services:
   tubearchivist:
     container_name: tubearchivist
     restart: unless-stopped
-    image: bbilly1/tubearchivist
+    build: .
     ports:
       - 8000:8000
     volumes:
@@ -13,9 +13,10 @@ services:
       - REDIS_HOST=archivist-redis          # don't add protocol
       - HOST_UID=1000
       - HOST_GID=1000
-      - TA_HOST=tubearchivist.local         # set your host name
+      - TA_HOST=localhost         # set your host name
       - TA_USERNAME=tubearchivist           # your initial TA credentials
       - TA_PASSWORD=verysecret              # your initial TA credentials
+      - ELASTIC_USERNAME=root@example.com
       - ELASTIC_PASSWORD=verysecret         # set password for Elasticsearch
       - TZ=America/New_York                 # set your time zone
     healthcheck:
@@ -27,12 +28,8 @@ services:
     depends_on:
       - archivist-es
       - archivist-redis
-
-  tubearchivist-frontend:
-    container_name: tubearchivist-frontend
-    image: tubearchivist-frontend
-    expose:
-      - "80"
+    networks:
+      - tubearchivist
 
   archivist-redis:
     image: redis/redis-stack-server
@@ -44,6 +41,10 @@ services:
       - redis:/data
     depends_on:
       - archivist-es
+    networks:
+      - tubearchivist
+
+
   archivist-es:
     image: bbilly1/tubearchivist-es         # only for amd64, or use official es 8.13.2
     container_name: archivist-es
@@ -59,12 +60,24 @@ services:
         soft: -1
         hard: -1
     volumes:
-      - es:/usr/share/elasticsearch/data    # check for permission error when using bind mount, see readme
-    expose:
-      - "9200"
+      - es:/data    # check for permission error when using bind mount, see readme
+    networks:
+      - tubearchivist
+
+  # kibana:
+  #   image: kibana:8.9.0
+  #   container_name: kibana
+  #   ports:
+  #   - "5601:5601"
+  #   volumes:
+  #   - ./kibana.yml:/usr/share/kibana/config/kibana.yml
 
 volumes:
   media:
   cache:
   redis:
   es:
+
+networks:
+  tubearchivist:
+     name: tubearchivist
