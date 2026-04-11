@@ -14,7 +14,7 @@ from typing import TypedDict
 
 import requests
 from common.src.env_settings import EnvironmentSettings
-from common.src.es_connect import ElasticWrap, IndexPaginate
+from common.src.es_connect import IndexPaginate, MeiliIndex
 from common.src.helper import rand_sleep, requests_headers
 from download.src.yt_dlp_base import CookieHandler
 from yt_dlp.utils import orderedSet_from_options
@@ -112,11 +112,11 @@ class YoutubeSubtitle:
         return media_url
 
     def get_es_subtitles(self) -> list[dict]:
-        """get subtitles from elastic"""
-        data = {
-            "query": {"term": {"youtube_id": {"value": self.video.youtube_id}}}
-        }
-        response = IndexPaginate("ta_subtitle", data).get_results()
+        """get subtitles from meilisearch"""
+        filter_str = f'youtube_id = "{self.video.youtube_id}"'
+        response = IndexPaginate(
+            "ta_subtitle", {}, filter_str=filter_str
+        ).get_results()
         return response
 
     def download_subtitles(self, relevant_subtitles):
@@ -146,8 +146,7 @@ class YoutubeSubtitle:
             self.write_subtitle_file(dest_path, subtitle_str)
             if self.video.config["downloads"]["subtitle_index"]:
                 documents = parser.create_documents(self.video, source)
-                query_str = parser.create_bulk_import(documents)
-                self.index_subtitle(query_str)
+                self.index_subtitle(documents)
 
             indexed.append(
                 {
@@ -212,9 +211,9 @@ class YoutubeSubtitle:
             os.chown(dest_path, host_uid, host_gid)
 
     @staticmethod
-    def index_subtitle(query_str):
-        """send subtitle to es for indexing"""
-        _, _ = ElasticWrap("_bulk").post(data=query_str, ndjson=True)
+    def index_subtitle(documents):
+        """send subtitle documents to meilisearch for indexing"""
+        MeiliIndex("ta_subtitle").add_documents(documents)
 
     def delete(self, subtitles=False):
         """delete subtitles from index and filesystem"""
@@ -236,9 +235,8 @@ class YoutubeSubtitle:
             except FileNotFoundError:
                 print(f"{youtube_id}: {file_path} failed to delete")
         # delete from index
-        path = "ta_subtitle/_delete_by_query?refresh=true"
-        data = {"query": {"term": {"youtube_id": {"value": youtube_id}}}}
-        _, _ = ElasticWrap(path).post(data=data)
+        filter_str = f'youtube_id = "{youtube_id}"'
+        MeiliIndex("ta_subtitle").delete_documents_by_filter(filter_str)
 
 
 class SubtitleParser:

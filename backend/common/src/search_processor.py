@@ -13,25 +13,30 @@ from download.src.thumbnails import ThumbManager
 
 
 class SearchProcess:
-    """process search results"""
+    """process search results
 
-    def __init__(self, response, match_video_user_progress: None | int = None):
+    Accepts either:
+    - a list of flat Meilisearch hit dicts (each with an injected `_index` key)
+    - a single flat dict (single-document lookup)
+    """
+
+    def __init__(
+        self,
+        response: list[dict] | dict,
+        match_video_user_progress: None | int = None,
+    ):
         self.response = response
         self.processed = False
         self.position_index = self.get_user_progress(match_video_user_progress)
 
     def process(self):
         """detect type and process"""
-        if "_source" in self.response.keys():
-            # single
+        if isinstance(self.response, list):
+            self.processed = [
+                self._process_result(hit) for hit in self.response
+            ]
+        elif isinstance(self.response, dict):
             self.processed = self._process_result(self.response)
-
-        elif "hits" in self.response.keys():
-            # multiple
-            self.processed = []
-            all_sources = self.response["hits"]["hits"]
-            for result in all_sources:
-                self.processed.append(self._process_result(result))
 
         return self.processed
 
@@ -52,36 +57,40 @@ class SearchProcess:
         }
         return pos_index
 
-    def _process_result(self, result):
+    def _process_result(self, result: dict):
         """detect which type of data to process"""
-        index = result["_index"]
+        index = result.get("_index", "")
+        # Meilisearch returns the document fields at the top level;
+        # _index was injected by SearchForm._search_index.
         processed = False
         if index.startswith("ta_video"):
-            processed = self._process_video(result["_source"])
-        if index.startswith("ta_channel"):
-            processed = self._process_channel(result["_source"])
-        if index.startswith("ta_playlist"):
-            processed = self._process_playlist(result["_source"])
-        if index.startswith("ta_download"):
-            processed = self._process_download(result["_source"])
-        if index.startswith("ta_comment"):
-            processed = self._process_comment(result["_source"])
-        if index.startswith("ta_subtitle"):
+            processed = self._process_video(result)
+        elif index.startswith("ta_channel"):
+            processed = self._process_channel(result)
+        elif index.startswith("ta_playlist"):
+            processed = self._process_playlist(result)
+        elif index.startswith("ta_download"):
+            processed = self._process_download(result)
+        elif index.startswith("ta_comment"):
+            processed = self._process_comment(result)
+        elif index.startswith("ta_subtitle"):
             processed = self._process_subtitle(result)
 
         if isinstance(processed, dict):
+            score = result.get("_rankingScore") or result.get("_score") or 0
             processed.update(
                 {
                     "_index": index,
-                    "_score": round(result.get("_score") or 0, 2),
+                    "_score": round(float(score), 2),
                 }
             )
 
         return processed
 
     @staticmethod
-    def _process_channel(channel_dict):
+    def _process_channel(channel_dict: dict) -> dict:
         """run on single channel"""
+        channel_dict = dict(channel_dict)  # shallow copy
         channel_id = channel_dict["channel_id"]
         cache_root = EnvironmentSettings().get_cache_root()
         art_base = f"{cache_root}/channels/{channel_id}"
@@ -110,8 +119,9 @@ class SearchProcess:
 
         return dict(sorted(channel_dict.items()))
 
-    def _process_video(self, video_dict):
+    def _process_video(self, video_dict: dict) -> dict:
         """run on single video dict"""
+        video_dict = dict(video_dict)  # shallow copy
         video_id = video_dict["youtube_id"]
         media_url = urllib.parse.quote(video_dict["media_url"])
         vid_last_refresh = date_parser(video_dict["vid_last_refresh"])
@@ -160,8 +170,9 @@ class SearchProcess:
         return dict(sorted(video_dict.items()))
 
     @staticmethod
-    def _process_playlist(playlist_dict):
+    def _process_playlist(playlist_dict: dict) -> dict:
         """run on single playlist dict"""
+        playlist_dict = dict(playlist_dict)
         playlist_id = playlist_dict["playlist_id"]
         playlist_last_refresh = date_parser(
             playlist_dict["playlist_last_refresh"]
@@ -179,8 +190,9 @@ class SearchProcess:
 
         return dict(sorted(playlist_dict.items()))
 
-    def _process_download(self, download_dict):
+    def _process_download(self, download_dict: dict) -> dict:
         """run on single download item"""
+        download_dict = dict(download_dict)
         vid_thumb_url = None
         if download_dict.get("vid_thumb_url"):
             video_id = download_dict["youtube_id"]
@@ -196,7 +208,7 @@ class SearchProcess:
         )
         return dict(sorted(download_dict.items()))
 
-    def _process_comment(self, comment_dict):
+    def _process_comment(self, comment_dict: dict) -> list:
         """run on all comments, create reply thread"""
         comment_tree = []
         lookup = {}
@@ -216,24 +228,21 @@ class SearchProcess:
 
         return comment_tree
 
-    def _process_subtitle(self, result):
-        """take complete result dict to extract highlight"""
-        subtitle_dict = result["_source"]
-        highlight = result.get("highlight")
-        if highlight:
-            # replace lines with the highlighted markdown
-            subtitle_line = highlight.get("subtitle_line")[0]
-            subtitle_dict.update({"subtitle_line": subtitle_line})
+    def _process_subtitle(self, result: dict) -> dict:
+        """extract highlight from Meilisearch _formatted field"""
+        subtitle_dict = dict(result)
+        formatted = result.get("_formatted")
+        if formatted and "subtitle_line" in formatted:
+            subtitle_dict["subtitle_line"] = formatted["subtitle_line"]
 
         thumb_path = ThumbManager(subtitle_dict["youtube_id"]).vid_thumb_path()
-        subtitle_dict.update({"vid_thumb_url": f"/cache/{thumb_path}"})
+        subtitle_dict["vid_thumb_url"] = f"/cache/{thumb_path}"
 
         return subtitle_dict
 
 
-def process_aggs(response):
-    """convert aggs duration to str"""
-
+def process_aggs(response: dict) -> None:
+    """convert aggs duration to str — kept for API compatibility"""
     if response.get("aggregations"):
         aggs = response["aggregations"]
         if "total_duration" in aggs:

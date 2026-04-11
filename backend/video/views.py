@@ -52,7 +52,7 @@ class VideoApiListView(ApiBaseView):
         validated_query = query_serializer.validated_data
 
         data = QueryBuilder(request.user.id, **validated_query).build_data()
-        if data == {"query": {"bool": {"must": [None]}}}:
+        if not data and not validated_query:
             # skip empty lookup
             return Response([])
 
@@ -272,18 +272,29 @@ class VideoSimilarView(ApiBaseView):
         responses=VideoSerializer(many=True),
     )
     def get(self, request, video_id):
-        """get similar videos"""
-        self.data = {
-            "size": 6,
-            "query": {
-                "more_like_this": {
-                    "fields": ["tags", "title"],
-                    "like": {"_id": video_id},
-                    "min_term_freq": 1,
-                    "max_query_terms": 25,
-                }
-            },
+        """get similar videos — same channel, up to 6 results"""
+        from common.src.es_connect import MeiliIndex
+
+        # fetch the current video to find its channel
+        doc = MeiliIndex("ta_video").get_document(video_id)
+        if not doc:
+            return Response([])
+
+        channel_id = (doc.get("channel") or {}).get("channel_id")
+        if not channel_id:
+            return Response([])
+
+        params = {
+            "filter": f"channel.channel_id = {channel_id!r} AND youtube_id != {video_id!r}",
+            "limit": 6,
         }
-        self.get_document_list(request, pagination=False)
-        serializer = VideoSerializer(self.response["data"], many=True)
+        response = MeiliIndex("ta_video").search("", params)
+        hits = response.get("hits", [])
+        for hit in hits:
+            hit["_index"] = "ta_video"
+
+        from common.src.search_processor import SearchProcess
+
+        results = SearchProcess(hits).process()
+        serializer = VideoSerializer(results, many=True)
         return Response(serializer.data)

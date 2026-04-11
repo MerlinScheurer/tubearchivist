@@ -1,217 +1,176 @@
 """
 functionality:
-- wrapper around requests to call elastic search
-- reusable search_after to extract total index
+- wrapper around meilisearch client
+- reusable IndexPaginate to extract an entire index
 """
 
-# pylint: disable=missing-timeout
-
-import json
 from typing import Any
 
-import requests
-import urllib3
+import meilisearch
 from common.src.env_settings import EnvironmentSettings
 
 
-class ElasticWrap:
-    """makes all calls to elastic search
-    returns response json and status code tuple
+def _doc_to_dict(doc) -> dict:
+    """Convert a Meilisearch Document object (or plain dict) to a plain dict."""
+    if isinstance(doc, dict):
+        return doc
+    # Document objects expose their fields via __dict__ or dict()
+    if hasattr(doc, "__dict__"):
+        return {k: v for k, v in doc.__dict__.items() if not k.startswith("_")}
+    return dict(doc)
+
+
+def get_meili_client() -> meilisearch.Client:
+    """return a configured meilisearch Client instance"""
+    return meilisearch.Client(
+        EnvironmentSettings.MEILI_HOST,
+        EnvironmentSettings.MEILI_MASTER_KEY,
+    )
+
+
+class MeiliIndex:
+    """thin wrapper around a single Meilisearch index
+
+    Provides helpers that mirror the old ElasticWrap call patterns so that
+    callers can be migrated incrementally.
     """
 
-    def __init__(self, path: str):
-        self.url: str = f"{EnvironmentSettings.ES_URL}/{path}"
-        self.auth: tuple[str, str] = (
-            EnvironmentSettings.ES_USER,
-            EnvironmentSettings.ES_PASS,
+    def __init__(self, index_name: str):
+        self.index_name = index_name
+        self._client = get_meili_client()
+        self._index = self._client.index(index_name)
+
+    # ------------------------------------------------------------------
+    # document CRUD
+    # ------------------------------------------------------------------
+
+    def get_document(self, doc_id: str) -> dict | None:
+        """fetch a single document by id, returns None when not found"""
+        try:
+            doc = self._index.get_document(doc_id)
+            return _doc_to_dict(doc)
+        except meilisearch.errors.MeilisearchApiError as exc:
+            if exc.code == "document_not_found":
+                return None
+            raise
+
+    def add_document(
+        self, document: dict, primary_key: str | None = None
+    ) -> dict:
+        """add or replace a document (upsert)"""
+        task = self._index.add_documents([document], primary_key=primary_key)
+        return task
+
+    def add_documents(
+        self,
+        documents: list[dict],
+        primary_key: str | None = None,
+        batch_size: int = 500,
+    ) -> list[dict]:
+        """add or replace multiple documents in batches"""
+        task = self._index.add_documents_in_batches(
+            documents,
+            batch_size=batch_size,
+            primary_key=primary_key,
         )
+        return task
 
-        if EnvironmentSettings.ES_DISABLE_VERIFY_SSL:
-            urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    def update_document(self, document: dict) -> dict:
+        """partial update — only supplied fields are changed"""
+        task = self._index.update_documents([document])
+        return task
 
-    def get(
-        self,
-        data: bool | dict = False,
-        timeout: int = 10,
-        print_error: bool = True,
-    ) -> tuple[dict, int]:
-        """get data from es"""
+    def delete_document(self, doc_id: str) -> dict:
+        """delete a single document by id"""
+        task = self._index.delete_document(doc_id)
+        return task
 
-        kwargs: dict[str, Any] = {
-            "auth": self.auth,
-            "timeout": timeout,
-        }
+    def delete_documents_by_filter(self, filter_str: str) -> dict:
+        """delete all documents matching a filter expression"""
+        task = self._index.delete_documents(filter=filter_str)
+        return task
 
-        if EnvironmentSettings.ES_DISABLE_VERIFY_SSL:
-            kwargs["verify"] = False
+    # ------------------------------------------------------------------
+    # search / browse
+    # ------------------------------------------------------------------
 
-        if data:
-            kwargs["json"] = data
+    def search(self, query: str = "", params: dict | None = None) -> dict:
+        """run a search query and return the raw Meilisearch response"""
+        return self._index.search(query, params or {})
 
-        response = requests.get(self.url, **kwargs)
+    def browse(
+        self, offset: int = 0, limit: int = 500, filter_str: str | None = None
+    ) -> list[dict]:
+        """browse documents without ranking (no query text), returns list of docs"""
+        params: dict[str, Any] = {"offset": offset, "limit": limit}
+        if filter_str:
+            params["filter"] = filter_str
+        result = self._index.get_documents(params)
+        # result is a DocumentsResults object; .results is a list of Document objects
+        docs = result.results if hasattr(result, "results") else list(result)
+        return [_doc_to_dict(d) for d in docs]
 
-        if print_error and not response.ok:
-            print(response.text)
+    # ------------------------------------------------------------------
+    # index settings
+    # ------------------------------------------------------------------
 
-        return response.json(), response.status_code
+    def update_settings(self, settings: dict) -> dict:
+        """update index settings (searchable/filterable/sortable attrs etc.)"""
+        return self._index.update_settings(settings)
 
-    def post(
-        self, data: bool | dict | str = False, ndjson: bool = False
-    ) -> tuple[dict, int]:
-        """post data to es"""
-
-        kwargs: dict[str, Any] = {"auth": self.auth}
-
-        if ndjson and data:
-            kwargs.update(
-                {
-                    "headers": {"Content-type": "application/x-ndjson"},
-                    "data": data,
-                }
-            )
-        elif data:
-            kwargs.update(
-                {
-                    "headers": {"Content-type": "application/json"},
-                    "data": json.dumps(data),
-                }
-            )
-
-        if EnvironmentSettings.ES_DISABLE_VERIFY_SSL:
-            kwargs["verify"] = False
-
-        response = requests.post(self.url, **kwargs)
-
-        if not response.ok:
-            print(response.text)
-
-        return response.json(), response.status_code
-
-    def put(
-        self,
-        data: bool | dict = False,
-        refresh: bool = False,
-    ) -> tuple[dict, Any]:
-        """put data to es"""
-
-        if refresh:
-            self.url = f"{self.url}/?refresh=true"
-
-        kwargs: dict[str, Any] = {
-            "json": data,
-            "auth": self.auth,
-        }
-
-        if EnvironmentSettings.ES_DISABLE_VERIFY_SSL:
-            kwargs["verify"] = False
-
-        response = requests.put(self.url, **kwargs)
-
-        if not response.ok:
-            print(response.text)
-            print(data)
-            raise ValueError("failed to add item to index")
-
-        return response.json(), response.status_code
-
-    def delete(
-        self,
-        data: bool | dict = False,
-        refresh: bool = False,
-    ) -> tuple[dict, Any]:
-        """delete document from es"""
-
-        if refresh:
-            self.url = f"{self.url}/?refresh=true"
-
-        kwargs: dict[str, Any] = {"auth": self.auth}
-
-        if data:
-            kwargs["json"] = data
-
-        if EnvironmentSettings.ES_DISABLE_VERIFY_SSL:
-            kwargs["verify"] = False
-
-        response = requests.delete(self.url, **kwargs)
-
-        if not response.ok:
-            print(response.text)
-
-        return response.json(), response.status_code
+    def get_settings(self) -> dict:
+        """return current index settings"""
+        return self._index.get_settings()
 
 
 class IndexPaginate:
-    """use search_after to go through whole index
+    """iterate through an entire Meilisearch index page by page.
+
+    Drop-in replacement for the old ES PIT-based IndexPaginate.
+
     kwargs:
-    - size: int, overwrite DEFAULT_SIZE
-    - keep_source: bool, keep _source key from es results
-    - callback: obj, Class implementing run method callback for every loop
+    - size: int, page size (default DEFAULT_SIZE)
+    - keep_source: bool, kept for compatibility — always True for Meilisearch
+    - callback: obj, Class implementing run method called for every page
     - task: task object to send notification
-    - total: int, total items in index for progress message
-    - timeout: int, overwrite timeout in get request
-    - pit_keep_alive: int, overwrite pit valid
+    - total: int, total items in index for progress messages
+    - filter_str: str, Meilisearch filter expression to restrict results
     """
 
     DEFAULT_SIZE = 500
 
-    def __init__(self, index_name, data, **kwargs):
+    def __init__(self, index_name: str, data: dict, **kwargs):
         self.index_name = index_name
-        self.data = data
-        self.pit_id = False
+        self.data = data or {}
         self.kwargs = kwargs
+        self._meili = MeiliIndex(index_name)
 
-    def get_results(self):
-        """get all results, add task and total for notifications"""
-        self.get_pit()
-        self.validate_data()
-        all_results = self.run_loop()
-        self.clean_pit()
-        return all_results
+    def get_results(self) -> list[dict]:
+        """return all documents from index, with optional filter"""
+        return self._run_loop()
 
-    def get_pit(self):
-        """get pit for index"""
-        keep_alive = self.kwargs.get("pit_keep_alive", 15)
-        path = f"{self.index_name}/_pit?keep_alive={keep_alive}m"
-        response, _ = ElasticWrap(path).post()
-        self.pit_id = response["id"]
-
-    def validate_data(self):
-        """add pit and size to data"""
-        if not self.data:
-            self.data = {}
-
-        if "query" not in self.data.keys():
-            self.data.update({"query": {"match_all": {}}})
-
-        if "sort" not in self.data.keys():
-            self.data.update({"sort": [{"_doc": {"order": "desc"}}]})
-
-        self.data["size"] = self.kwargs.get("size") or self.DEFAULT_SIZE
-        self.data["pit"] = {"id": self.pit_id, "keep_alive": "15m"}
-
-    def run_loop(self):
-        """loop through results until last hit"""
-        all_results = []
+    def _run_loop(self) -> list[dict]:
+        size = self.kwargs.get("size") or self.DEFAULT_SIZE
+        filter_str = self.kwargs.get("filter_str") or self.data.get("filter")
+        all_results: list[dict] = []
+        offset = 0
         counter = 0
-        while True:
-            get_kwargs = {"data": self.data}
-            if timeout_overwrite := self.kwargs.get("timeout"):
-                get_kwargs.update({"timeout": timeout_overwrite})
 
-            response, _ = ElasticWrap("_search").get(**get_kwargs)
-            all_hits = response["hits"]["hits"]
-            if not all_hits:
+        while True:
+            hits = self._meili.browse(
+                offset=offset,
+                limit=size,
+                filter_str=filter_str,
+            )
+
+            if not hits:
                 break
 
-            for hit in all_hits:
-                if self.kwargs.get("keep_source"):
-                    all_results.append(hit)
-                else:
-                    all_results.append(hit["_source"])
+            all_results.extend(hits)
 
             if self.kwargs.get("callback"):
-                self.kwargs.get("callback")(
-                    all_hits, self.index_name, counter=counter
+                self.kwargs["callback"](
+                    hits, self.index_name, counter=counter
                 ).run()
 
             if self.kwargs.get("task"):
@@ -219,20 +178,18 @@ class IndexPaginate:
                 self._notify(len(all_results))
 
             counter += 1
+            offset += len(hits)
 
-            # update search_after with last hit data
-            self.data["search_after"] = all_hits[-1]["sort"]
+            # stop when we received a partial page (last page)
+            if len(hits) < size:
+                break
 
         return all_results
 
-    def _notify(self, processed):
+    def _notify(self, processed: int) -> None:
         """send notification on task"""
         total = self.kwargs.get("total")
-        progress = processed / total
+        progress = processed / total if total else 0
         index_clean = self.index_name.lstrip("ta_").title()
         message = [f"Processing {index_clean}s {processed}/{total}"]
-        self.kwargs.get("task").send_progress(message, progress=progress)
-
-    def clean_pit(self):
-        """delete pit from elastic search"""
-        ElasticWrap("_pit").delete(data={"id": self.pit_id})
+        self.kwargs["task"].send_progress(message, progress=progress)

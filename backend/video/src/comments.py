@@ -8,7 +8,7 @@ Functionality:
 from datetime import datetime
 
 from appsettings.src.config import AppConfig
-from common.src.es_connect import ElasticWrap
+from common.src.es_connect import MeiliIndex
 from common.src.helper import rand_sleep
 from common.src.ta_redis import RedisQueue
 from download.src.yt_dlp_base import YtWrap
@@ -19,7 +19,6 @@ class Comments:
 
     def __init__(self, youtube_id, config=False):
         self.youtube_id = youtube_id
-        self.es_path = f"ta_comment/_doc/{youtube_id}"
         self.json_data = False
         self.config = config
         self.is_activated = False
@@ -143,29 +142,31 @@ class Comments:
         return cleaned_comment
 
     def upload_comments(self):
-        """upload comments to es"""
+        """upload comments to meilisearch"""
         print(f"{self.youtube_id}: upload comments")
-        _, _ = ElasticWrap(self.es_path).put(self.json_data)
+        MeiliIndex("ta_comment").add_document(self.json_data)
 
-        vid_path = f"ta_video/_update/{self.youtube_id}"
-        data = {
-            "doc": {"comment_count": len(self.json_data["comment_comments"])}
-        }
-        _, _ = ElasticWrap(vid_path).post(data=data)
+        # update comment_count on the video document
+        video_doc = MeiliIndex("ta_video").get_document(self.youtube_id)
+        if video_doc:
+            video_doc["comment_count"] = len(
+                self.json_data["comment_comments"]
+            )
+            MeiliIndex("ta_video").add_document(video_doc)
 
     def delete_comments(self):
-        """delete comments from es"""
+        """delete comments from meilisearch"""
         print(f"{self.youtube_id}: delete comments")
-        _, _ = ElasticWrap(self.es_path).delete(refresh=True)
+        MeiliIndex("ta_comment").delete_document(self.youtube_id)
 
     def get_es_comments(self):
-        """get comments from ES"""
-        response, statuscode = ElasticWrap(self.es_path).get()
-        if statuscode == 404:
+        """get comments from meilisearch"""
+        doc = MeiliIndex("ta_comment").get_document(self.youtube_id)
+        if not doc:
             print(f"comments: not found {self.youtube_id}")
             return False
 
-        return response.get("_source")
+        return doc
 
     def reindex_comments(self):
         """update comments from youtube"""

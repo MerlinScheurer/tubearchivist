@@ -1,19 +1,37 @@
 """send notifications using apprise"""
 
 import apprise
-from common.src.es_connect import ElasticWrap
+from common.src.ta_redis import RedisArchivist
 from task.src.task_config import TASK_CONFIG
 from task.src.task_manager import TaskManager
 
+REDIS_KEY = "notify"
+
 
 class Notifications:
-    """store notifications in ES"""
-
-    GET_PATH = "ta_config/_doc/notify"
-    UPDATE_PATH = "ta_config/_update/notify/"
+    """store notification URLs in Redis"""
 
     def __init__(self, task_name: str):
         self.task_name = task_name
+
+    # ------------------------------------------------------------------
+    # internal helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _get_all() -> dict:
+        """return the full notify dict from Redis, or empty dict"""
+        stored = RedisArchivist().get_message_dict(REDIS_KEY)
+        return stored if isinstance(stored, dict) else {}
+
+    @staticmethod
+    def _save_all(data: dict) -> None:
+        """persist the full notify dict to Redis"""
+        RedisArchivist().set_message(REDIS_KEY, data, save=True)
+
+    # ------------------------------------------------------------------
+    # public API
+    # ------------------------------------------------------------------
 
     def send(self, task_id: str, task_title: str) -> None:
         """send notifications"""
@@ -53,10 +71,7 @@ class Notifications:
                 return success, message
 
             success = False
-            message = (
-                "Notification failed. "
-                "Please check container logs for more information."
-            )
+            message = "Notification failed. Please check container logs for more information."
             return success, message
 
         except Exception as err:  # pylint: disable=broad-exception-caught
@@ -76,98 +91,57 @@ class Notifications:
         return title, body
 
     def get_urls(self) -> list[str]:
-        """get stored urls for task"""
-        response, code = ElasticWrap(self.GET_PATH).get(print_error=False)
-        if not code == 200:
-            return []
-
-        urls = response["_source"].get(self.task_name, [])
-
-        return urls
+        """get stored URLs for this task"""
+        data = self._get_all()
+        return data.get(self.task_name, [])
 
     def add_url(self, url: str) -> None:
-        """add url to task notification"""
-        source = (
-            "if (!ctx._source.containsKey(params.task_name)) "
-            + "{ctx._source[params.task_name] = [params.url]} "
-            + "else if (!ctx._source[params.task_name].contains(params.url)) "
-            + "{ctx._source[params.task_name].add(params.url)} "
-            + "else {ctx.op = 'none'}"
-        )
-
-        data = {
-            "script": {
-                "source": source,
-                "lang": "painless",
-                "params": {"url": url, "task_name": self.task_name},
-            },
-            "upsert": {self.task_name: [url]},
-        }
-
-        _, _ = ElasticWrap(self.UPDATE_PATH).post(data)
+        """add URL to task notification list"""
+        data = self._get_all()
+        urls: list[str] = data.get(self.task_name, [])
+        if url not in urls:
+            urls.append(url)
+            data[self.task_name] = urls
+            self._save_all(data)
 
     def remove_url(self, url: str) -> tuple[dict, int]:
-        """remove url from task"""
-        source = (
-            "if (ctx._source.containsKey(params.task_name) "
-            + "&& ctx._source[params.task_name].contains(params.url)) "
-            + "{ctx._source[params.task_name]."
-            + "remove(ctx._source[params.task_name].indexOf(params.url))}"
-        )
+        """remove URL from task notification list"""
+        data = self._get_all()
+        urls: list[str] = data.get(self.task_name, [])
+        if url in urls:
+            urls.remove(url)
+            if urls:
+                data[self.task_name] = urls
+            else:
+                data.pop(self.task_name, None)
+            self._save_all(data)
 
-        data = {
-            "script": {
-                "source": source,
-                "lang": "painless",
-                "params": {"url": url, "task_name": self.task_name},
-            }
-        }
-
-        response, status_code = ElasticWrap(self.UPDATE_PATH).post(data)
         if not self.get_urls():
-            _, _ = self.remove_task()
+            self.remove_task()
 
-        return response, status_code
+        return {}, 200
 
     def remove_task(self) -> tuple[dict, int]:
-        """remove all notifications from task"""
-        source = (
-            "if (ctx._source.containsKey(params.task_name)) "
-            + "{ctx._source.remove(params.task_name)}"
-        )
-        data = {
-            "script": {
-                "source": source,
-                "lang": "painless",
-                "params": {"task_name": self.task_name},
-            }
-        }
-
-        response, status_code = ElasticWrap(self.UPDATE_PATH).post(data)
-
-        return response, status_code
+        """remove all notification URLs for this task"""
+        data = self._get_all()
+        data.pop(self.task_name, None)
+        self._save_all(data)
+        return {}, 200
 
 
 def get_all_notifications() -> dict[str, list[str]]:
     """get all notifications stored"""
-    path = "ta_config/_doc/notify"
-    response, status_code = ElasticWrap(path).get(print_error=False)
-    if not status_code == 200:
+    stored = RedisArchivist().get_message_dict(REDIS_KEY)
+    if not stored or not isinstance(stored, dict):
         return {}
 
     notifications: dict = {}
-    source = response.get("_source")
-    if not source:
-        return notifications
-
-    for task_id, urls in source.items():
-        notifications.update(
-            {
-                task_id: {
-                    "urls": urls,
-                    "title": TASK_CONFIG[task_id]["title"],
-                }
-            }
-        )
+    for task_id, urls in stored.items():
+        if task_id not in TASK_CONFIG:
+            continue
+        notifications[task_id] = {
+            "urls": urls,
+            "title": TASK_CONFIG[task_id]["title"],
+        }
 
     return notifications

@@ -4,7 +4,6 @@ Functionality:
 - linked with ta_dowload index
 """
 
-import json
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -12,7 +11,7 @@ from appsettings.src.config import AppConfig
 from channel.src.index import YoutubeChannel
 from channel.src.remote_query import get_last_channel_videos
 from common.src.env_settings import EnvironmentSettings
-from common.src.es_connect import ElasticWrap, IndexPaginate
+from common.src.es_connect import IndexPaginate, MeiliIndex
 from common.src.helper import (
     get_channels,
     get_duration_str,
@@ -42,11 +41,7 @@ class PendingIndex:
 
     def get_download(self):
         """get a list of all pending videos in ta_download"""
-        data = {
-            "query": {"match_all": {}},
-            "sort": [{"timestamp": {"order": "asc"}}],
-        }
-        all_results = IndexPaginate("ta_download", data).get_results()
+        all_results = IndexPaginate("ta_download", {}).get_results()
 
         self.all_pending = []
         self.all_ignored = []
@@ -61,11 +56,7 @@ class PendingIndex:
 
     def get_indexed(self):
         """get a list of all videos indexed"""
-        data = {
-            "query": {"match_all": {}},
-            "sort": [{"published": {"order": "desc"}}],
-        }
-        self.all_videos = IndexPaginate("ta_video", data).get_results()
+        self.all_videos = IndexPaginate("ta_video", {}).get_results()
         for video in self.all_videos:
             self.to_skip.append(video["youtube_id"])
 
@@ -466,7 +457,7 @@ class PendingList(PendingIndex):
             return 0
 
         self._notify_start(total)
-        bulk_list = []
+        documents = []
         for video_entry in self.missing_videos:
             video_entry.update(
                 {
@@ -474,31 +465,19 @@ class PendingList(PendingIndex):
                     "auto_start": self.auto_start,
                 }
             )
-            video_id = video_entry["youtube_id"]
-            action = {"index": {"_index": "ta_download", "_id": video_id}}
-            bulk_list.append(json.dumps(action))
-            bulk_list.append(json.dumps(video_entry))
+            serializer = DownloadItemSerializer(data=video_entry)
+            if serializer.is_valid():
+                documents.append(video_entry)
+            else:
+                video_id = video_entry.get("youtube_id", "unknown")
+                print(f"{video_id}: serializer failed: {serializer.errors}")
+                self._notify_fail(400, video_id)
 
-        # add last newline
-        bulk_list.append("\n")
-        query_str = "\n".join(bulk_list)
-        response, status_code = ElasticWrap("_bulk").post(
-            query_str, ndjson=True
-        )
-        if status_code not in [200, 201]:
-            print(response)
-            self._notify_fail(status_code)
-        elif response.get("errors", False):
-            failed_video_ids = []
-            for item in response.get("items", []):
-                action, result = next(iter(item.items()))
-                if "error" in result:
-                    failed_video_ids.append(result.get("_id"))
-
-            failed_video_ids_str = ",".join(failed_video_ids)
-            self._notify_fail(status_code, failed_video_ids_str)
+        if documents:
+            MeiliIndex("ta_download").add_documents(documents)
+            self._notify_done(len(documents))
         else:
-            self._notify_done(total)
+            self._notify_fail(400)
 
         return len(self.missing_videos)
 

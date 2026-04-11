@@ -4,13 +4,12 @@ Functionality:
 - load config variables into redis
 """
 
+import copy
 from random import randint
 from time import sleep
 from typing import Literal, TypedDict
 
 import requests
-from appsettings.src.snapshot import ElasticSnapshot
-from common.src.es_connect import ElasticWrap
 from common.src.ta_redis import RedisArchivist
 from django.conf import settings
 
@@ -51,7 +50,6 @@ class DownloadsConfigType(TypedDict):
 class ApplicationConfigType(TypedDict):
     """describes application config"""
 
-    enable_snapshot: bool
     enable_cast: bool
 
 
@@ -66,8 +64,7 @@ class AppConfigType(TypedDict):
 class AppConfig:
     """handle application variables"""
 
-    ES_PATH = "ta_config/_doc/appsettings"
-    ES_UPDATE_PATH = "ta_config/_update/appsettings"
+    REDIS_KEY = "appsettings"
     CONFIG_DEFAULTS: AppConfigType = {
         "subscriptions": {
             "channel_size": 50,
@@ -97,7 +94,6 @@ class AppConfig:
             "integrate_sponsorblock": False,
         },
         "application": {
-            "enable_snapshot": True,
             "enable_cast": False,
         },
     }
@@ -106,12 +102,16 @@ class AppConfig:
         self.config = self.get_config()
 
     def get_config(self) -> AppConfigType:
-        """get config from ES"""
-        response, status_code = ElasticWrap(self.ES_PATH).get()
-        if not status_code == 200:
-            raise ValueError(f"no config found at {self.ES_PATH}")
+        """get config from Redis; falls back to CONFIG_DEFAULTS if not yet initialised"""
+        stored = RedisArchivist().get_message_dict(self.REDIS_KEY)
+        if stored:
+            return stored  # type: ignore
+        return copy.deepcopy(self.CONFIG_DEFAULTS)
 
-        return response["_source"]
+    def _get_from_redis(self) -> AppConfigType | None:
+        """return stored config or None — used by callers that need to detect first-run"""
+        stored = RedisArchivist().get_message_dict(self.REDIS_KEY)
+        return stored or None  # type: ignore
 
     def update_config(self, data: dict) -> AppConfigType:
         """update single config value"""
@@ -126,19 +126,14 @@ class AppConfig:
             else:
                 new_config[key] = value
 
-        response, status_code = ElasticWrap(self.ES_PATH).post(new_config)
-        if not status_code == 200:
-            print(response)
-
+        RedisArchivist().set_message(self.REDIS_KEY, new_config, save=True)
         self.config = new_config
 
         return new_config
 
     def post_process_updated(self, data: dict) -> None:
-        """apply hooks for some config keys"""
-        for config_value, updated_value in data:
-            if config_value == "application.enable_snapshot" and updated_value:
-                ElasticSnapshot().setup()
+        """apply hooks for some config keys — snapshot support removed"""
+        pass
 
     @staticmethod
     def _fail_message(message_line):
@@ -156,21 +151,21 @@ class AppConfig:
 
     def sync_defaults(self):
         """sync defaults at startup, needs to be called with __new__"""
-        return ElasticWrap(self.ES_PATH).post(self.CONFIG_DEFAULTS)
+        RedisArchivist().set_message(
+            self.REDIS_KEY, self.CONFIG_DEFAULTS, save=True
+        )
 
     def add_new_defaults(self) -> list[str]:
-        """add new default config values to ES, called at startup"""
+        """add new default config values, called at startup"""
         updated = []
         for key, value in self.CONFIG_DEFAULTS.items():
             if key not in self.config:
-                # complete new key
                 self.update_config({key: value})
                 updated.append(str({key: value}))
                 continue
 
             for sub_key, sub_value in value.items():  # type: ignore
                 if sub_key not in self.config[key]:
-                    # new partial key
                     to_update = {key: {sub_key: sub_value}}
                     self.update_config(to_update)
                     updated.append(str(to_update))
@@ -182,7 +177,6 @@ class AppConfig:
         cleared = []
         for key in list(self.config.keys()):
             if key not in self.CONFIG_DEFAULTS:
-                # complete key removed
                 value = self.config.pop(key)
                 cleared.append(str({key: value}))
                 continue
@@ -199,9 +193,7 @@ class AppConfig:
         if not cleared:
             return []
 
-        response, status_code = ElasticWrap(self.ES_PATH).post(self.config)
-        if not status_code == 200:
-            print(response)
+        RedisArchivist().set_message(self.REDIS_KEY, self.config, save=True)
 
         return cleared
 

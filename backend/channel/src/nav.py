@@ -1,6 +1,6 @@
 """build channel nav"""
 
-from common.src.es_connect import ElasticWrap
+from common.src.es_connect import IndexPaginate, MeiliIndex
 
 
 class ChannelNav:
@@ -21,77 +21,48 @@ class ChannelNav:
 
     def _get_vid_types(self):
         """get available vid_types in given channel"""
-        data = {
-            "size": 0,
-            "query": {
-                "term": {"channel.channel_id": {"value": self.channel_id}}
-            },
-            "aggs": {"unique_values": {"terms": {"field": "vid_type"}}},
-        }
-        response, _ = ElasticWrap("ta_video/_search").get(data)
-        buckets = response["aggregations"]["unique_values"]["buckets"]
+        docs = IndexPaginate(
+            "ta_video",
+            {},
+            filter_str=f"channel.channel_id = {self.channel_id!r}",
+        ).get_results()
 
         type_nav = {
             "has_videos": False,
             "has_streams": False,
             "has_shorts": False,
         }
-        for bucket in buckets:
-            if bucket["key"] == "videos":
+        for doc in docs:
+            vid_type = doc.get("vid_type")
+            if vid_type == "videos":
                 type_nav["has_videos"] = True
-            if bucket["key"] == "streams":
+            elif vid_type == "streams":
                 type_nav["has_streams"] = True
-            if bucket["key"] == "shorts":
+            elif vid_type == "shorts":
                 type_nav["has_shorts"] = True
+
+            if all(type_nav.values()):
+                break
 
         return type_nav
 
     def _get_has_pending(self):
         """check if has pending videos in download queue"""
-        data = {
-            "size": 1,
-            "query": {
-                "bool": {
-                    "must": [
-                        {"term": {"status": {"value": "pending"}}},
-                        {"term": {"channel_id": {"value": self.channel_id}}},
-                    ]
-                }
-            },
-            "_source": False,
-        }
-        response, _ = ElasticWrap("ta_download/_search").get(data=data)
-
-        return bool(response["hits"]["hits"])
+        filter_str = f"status = 'pending' AND channel_id = {self.channel_id!r}"
+        params = {"filter": filter_str, "limit": 1}
+        response = MeiliIndex("ta_download").search("", params)
+        return bool(response.get("hits"))
 
     def _get_has_ignored(self):
         """Check if there are ignored videos in the download queue"""
-        data = {
-            "size": 1,
-            "query": {
-                "bool": {
-                    "must": [
-                        {"term": {"status": {"value": "ignore"}}},
-                        {"term": {"channel_id": {"value": self.channel_id}}},
-                    ]
-                }
-            },
-            "_source": False,
-        }
-        response, _ = ElasticWrap("ta_download/_search").get(data=data)
-
-        return bool(response["hits"]["hits"])
+        filter_str = f"status = 'ignore' AND channel_id = {self.channel_id!r}"
+        params = {"filter": filter_str, "limit": 1}
+        response = MeiliIndex("ta_download").search("", params)
+        return bool(response.get("hits"))
 
     def _get_has_playlists(self):
         """check if channel has playlists"""
-        path = "ta_playlist/_search"
-        data = {
-            "size": 1,
-            "query": {
-                "term": {"playlist_channel_id": {"value": self.channel_id}}
-            },
-            "_source": False,
-        }
-        response, _ = ElasticWrap(path).get(data=data)
-
-        return bool(response["hits"]["hits"])
+        filter_str = f"playlist_channel_id = {self.channel_id!r}"
+        params = {"filter": filter_str, "limit": 1}
+        response = MeiliIndex("ta_playlist").search("", params)
+        return bool(response.get("hits"))

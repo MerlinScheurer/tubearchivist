@@ -83,8 +83,26 @@ class YtWrap:
                 self.obs["plugin_dirs"].append("/opt/yt_plugins/bgutil")
 
     def download(self, url):
-        """make download request"""
+        """make download request; returns (success, error, info_dict)"""
         self.obs.update({"check_formats": "selected"})
+        captured_info: list[dict] = []
+
+        def _capture_hook(d):
+            if d.get("status") == "finished":
+                info = d.get("info_dict")
+                if info and not captured_info:
+                    captured_info.append(info)
+
+        # postprocessor_hooks fires after each postprocessor (e.g. MoveFiles)
+        pp_hooks = list(self.obs.get("postprocessor_hooks", []))
+        pp_hooks.append(_capture_hook)
+        self.obs["postprocessor_hooks"] = pp_hooks
+
+        # progress_hooks fires when the download segment itself finishes
+        prog_hooks = list(self.obs.get("progress_hooks", []))
+        prog_hooks.append(_capture_hook)
+        self.obs["progress_hooks"] = prog_hooks
+
         with yt_dlp.YoutubeDL(self.obs) as ydl:
             try:
                 ydl.download([url])
@@ -97,11 +115,12 @@ class YtWrap:
                     rand_sleep(self.config)
                     raise ConnectionError(self.BOT_ERROR_LOG) from err
 
-                return False, str(err)
+                return False, str(err), None
 
         self._validate_cookie()
 
-        return True, True
+        info_dict = captured_info[0] if captured_info else None
+        return True, True, info_dict
 
     def extract(self, url) -> tuple[dict | None, str | None]:
         """

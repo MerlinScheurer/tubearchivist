@@ -57,12 +57,11 @@ TOPIC = """
 EXPECTED_ENV_VARS = [
     "TA_USERNAME",
     "TA_PASSWORD",
-    "ELASTIC_PASSWORD",
-    "ES_URL",
+    "MEILI_MASTER_KEY",
     "TA_HOST",
 ]
 FILE_FALLBACK = [
-    "ELASTIC_PASSWORD",
+    "MEILI_MASTER_KEY",
     "TA_PASSWORD",
 ]
 UNEXPECTED_ENV_VARS = {
@@ -70,6 +69,8 @@ UNEXPECTED_ENV_VARS = {
     "REDIS_HOST": "Has been replaced with 'REDIS_CON' connection string",
     "REDIS_PORT": "Has been consolidated in 'REDIS_CON' connection string",
     "ENABLE_CAST": "That is now a toggle in setting and DISABLE_STATIC_AUTH",
+    "ES_URL": "Elasticsearch has been replaced with Meilisearch, use 'MEILI_HOST' instead",
+    "ELASTIC_PASSWORD": "Elasticsearch has been replaced with Meilisearch, use 'MEILI_MASTER_KEY' instead",
 }
 INST = "https://github.com/tubearchivist/tubearchivist#installing-and-updating"
 NGINX = "/etc/nginx/sites-available/default"
@@ -178,10 +179,12 @@ class Command(BaseCommand):
         self.stdout.write(self.style.SUCCESS(message))
 
     def _elastic_user_overwrite(self):
-        """check for ELASTIC_USER overwrite"""
-        self.stdout.write("[3] check ES user overwrite")
-        env = EnvironmentSettings.ES_USER
-        self.stdout.write(self.style.SUCCESS(f"    ✓ ES user is set to {env}"))
+        """check Meilisearch host config"""
+        self.stdout.write("[3] check Meilisearch host")
+        env = EnvironmentSettings.MEILI_HOST
+        self.stdout.write(
+            self.style.SUCCESS(f"    ✓ Meilisearch host is set to {env}")
+        )
 
     def _ta_port_overwrite(self):
         """set TA_PORT overwrite for nginx"""

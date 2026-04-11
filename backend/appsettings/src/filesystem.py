@@ -64,11 +64,7 @@ class Scanner:
         if self.task:
             self.task.send_progress(["Get all videos indexed."])
 
-        data = {
-            "query": {"match_all": {}},
-            "_source": ["youtube_id", "media_url"],
-        }
-        response = IndexPaginate("ta_video", data).get_results()
+        response = IndexPaginate("ta_video", {}).get_results()
         return {(i["youtube_id"], i["media_url"]) for i in response}
 
     def apply(self) -> None:

@@ -12,13 +12,13 @@ import zipfile
 from datetime import datetime
 
 from common.src.env_settings import EnvironmentSettings
-from common.src.es_connect import ElasticWrap, IndexPaginate
+from common.src.es_connect import IndexPaginate, MeiliIndex, get_meili_client
 from common.src.helper import get_mapping, ignore_filelist
 from task.models import CustomPeriodicTask
 
 
 class ElasticBackup:
-    """dump index to nd-json files for later bulk import"""
+    """dump index to json files for later bulk import"""
 
     INDEX_SIZE_CONF = {
         "comment": 100,
@@ -59,7 +59,7 @@ class ElasticBackup:
     def backup_index(self, index_name):
         """export all documents of a single index"""
         paginate_kwargs = {
-            "data": {"query": {"match_all": {}}},
+            "data": {},
             "keep_source": True,
             "callback": BackupCallback,
             "task": self.task,
@@ -76,10 +76,12 @@ class ElasticBackup:
     @staticmethod
     def _get_total(index_name):
         """get total documents in index"""
-        path = f"ta_{index_name}/_count"
-        response, _ = ElasticWrap(path).get()
-
-        return response.get("count")
+        try:
+            client = get_meili_client()
+            stats = client.index(f"ta_{index_name}").get_stats()
+            return stats.number_of_documents
+        except Exception:
+            return 0
 
     def zip_it(self):
         """pack it up into single zip file"""
@@ -102,14 +104,52 @@ class ElasticBackup:
             os.remove(backup_file)
 
     def post_bulk_restore(self, file_name):
-        """send bulk to es"""
+        """restore documents from a json backup file"""
         with open(file_name, "r", encoding="utf-8") as f:
             data = f.read()
 
         if not data.strip():
             return
 
-        _, _ = ElasticWrap("_bulk").post(data=data, ndjson=True)
+        # Support both legacy ES ndjson format and new JSON array format
+        first_char = data.strip()[0]
+        if first_char == "[":
+            # new format: JSON array of documents
+            documents = json.loads(data)
+            if not documents:
+                return
+            # Derive index name from filename: es_<index>-YYYYMMDD-N.json
+            basename = os.path.basename(file_name)
+            index_match = re.match(r"es_(\w+)-", basename)
+            if index_match:
+                index_name = f"ta_{index_match.group(1)}"
+                MeiliIndex(index_name).add_documents(documents)
+        else:
+            # legacy ndjson: parse action+source pairs
+            lines = [l for l in data.splitlines() if l.strip()]
+            by_index: dict = {}
+            i = 0
+            while i < len(lines) - 1:
+                try:
+                    action = json.loads(lines[i])
+                    source = json.loads(lines[i + 1])
+                except json.JSONDecodeError:
+                    i += 1
+                    continue
+                op = action.get("index") or action.get("update")
+                if op:
+                    idx = re.sub(r"_v\d+$", "", op.get("_index", ""))
+                    if idx not in by_index:
+                        by_index[idx] = []
+                    if "doc" in source:
+                        by_index[idx].append(source["doc"])
+                    else:
+                        by_index[idx].append(source)
+                i += 2
+
+            for idx, docs in by_index.items():
+                if docs:
+                    MeiliIndex(idx).add_documents(docs)
 
     def get_all_backup_files(self):
         """build all available backup files for view"""
@@ -157,7 +197,7 @@ class ElasticBackup:
     def restore(self, filename):
         """
         restore from backup zip file
-        call reset from ElasticIndexWrap first to start blank
+        call reset from MeiliIndexWrap first to start blank
         """
         zip_content = self._unpack_zip_backup(filename)
         zip_content.sort()
@@ -195,11 +235,13 @@ class ElasticBackup:
 
     @staticmethod
     def index_exists(index_name):
-        """check if index already exists to skip"""
-        _, status_code = ElasticWrap(f"ta_{index_name}").get()
-        exists = status_code == 200
-
-        return exists
+        """check if index already exists"""
+        try:
+            client = get_meili_client()
+            client.index(f"ta_{index_name}").get_stats()
+            return True
+        except Exception:
+            return False
 
     def rotate_backup(self):
         """delete old backups if needed"""
@@ -237,7 +279,7 @@ class ElasticBackup:
 
 
 class BackupCallback:
-    """handle backup ndjson writer as callback for IndexPaginate"""
+    """handle backup json writer as callback for IndexPaginate"""
 
     def __init__(self, source, index_name, counter=0):
         self.source = source
@@ -247,32 +289,13 @@ class BackupCallback:
         self.cache_dir = EnvironmentSettings.CACHE_DIR
 
     def run(self):
-        """run the junk task"""
-        file_content = self._build_bulk()
-        self._write_es_json(file_content)
+        """write documents as JSON array to disk"""
+        self._write_json(self.source)
 
-    def _build_bulk(self):
-        """build bulk query data from all_results"""
-        bulk_list = []
-
-        for document in self.source:
-            document_id = document["_id"]
-            es_index = re.sub(r"_v\d+$", "", document["_index"])  # remove _v
-            action = {"index": {"_index": es_index, "_id": document_id}}
-            source = document["_source"]
-            bulk_list.append(json.dumps(action))
-            bulk_list.append(json.dumps(source))
-
-        # add last newline
-        bulk_list.append("\n")
-        file_content = "\n".join(bulk_list)
-
-        return file_content
-
-    def _write_es_json(self, file_content):
-        """write nd-json file for es _bulk API to disk"""
+    def _write_json(self, documents):
+        """write JSON array file for later restore"""
         index = self.index_name.lstrip("ta_")
         file_name = f"es_{index}-{self.timestamp}-{self.counter}.json"
         file_path = os.path.join(self.cache_dir, "backup", file_name)
         with open(file_path, "a+", encoding="utf-8") as f:
-            f.write(file_content)
+            json.dump(documents, f)

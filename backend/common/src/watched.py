@@ -5,7 +5,7 @@ functionality:
 
 from datetime import datetime
 
-from common.src.es_connect import ElasticWrap
+from common.src.es_connect import IndexPaginate, MeiliIndex
 from common.src.ta_redis import RedisArchivist
 from common.src.urlparser import Parser
 
@@ -18,7 +18,6 @@ class WatchState:
         self.is_watched = is_watched
         self.user_id = user_id
         self.stamp = int(datetime.now().timestamp())
-        self.pipeline = f"_ingest/pipeline/watch_{youtube_id}"
 
     def change(self):
         """change watched state of item(s)"""
@@ -33,11 +32,7 @@ class WatchState:
         if url_type == "playlist":
             self.reset_playlist_progress()
 
-        self._add_pipeline()
-        path = f"ta_video/_update_by_query?pipeline=watch_{self.youtube_id}"
-        data = self._build_update_data(url_type)
-        _, _ = ElasticWrap(path).post(data)
-        self._delete_pipeline()
+        self._update_bulk(url_type)
 
     def _dedect_type(self):
         """find youtube id type"""
@@ -46,17 +41,21 @@ class WatchState:
         return url_type
 
     def change_vid_state(self):
-        """change watched state of video"""
-        path = f"ta_video/_update/{self.youtube_id}"
-        data = {"doc": {"player": {"watched": self.is_watched}}}
+        """change watched state of a single video"""
+        meili = MeiliIndex("ta_video")
+        doc = meili.get_document(self.youtube_id)
+        if not doc:
+            raise ValueError("failed to mark video as watched")
+
+        player = dict(doc.get("player") or {})
+        player["watched"] = self.is_watched
         if self.is_watched:
-            data["doc"]["player"]["watched_date"] = self.stamp
-        response, status_code = ElasticWrap(path).post(data=data)
+            player["watched_date"] = self.stamp
+        doc["player"] = player
+        meili.add_document(doc)
+
         key = f"{self.user_id}:progress:{self.youtube_id}"
         RedisArchivist().del_message(key)
-        if status_code != 200:
-            print(response)
-            raise ValueError("failed to mark video as watched")
 
     def reset_channel_progress(self):
         """reset channel progress positions"""
@@ -83,52 +82,31 @@ class WatchState:
             if video_id in video_ids:
                 redis_con.del_message(progress_id)
 
-    def _build_update_data(self, url_type):
-        """build update by query data based on url_type"""
+    def _update_bulk(self, url_type: str):
+        """fetch all matching videos, update watched state, reindex"""
         term_key_map = {
             "channel": "channel.channel_id",
-            "playlist": "playlist.keyword",
+            "playlist": "playlist",
         }
-        term_key = term_key_map.get(url_type)
+        field = term_key_map[url_type]
+        filter_str = (
+            f"{field} = {self.youtube_id!r}"
+            f" AND player.watched = {str(not self.is_watched).lower()}"
+        )
+        docs = IndexPaginate(
+            "ta_video", {}, filter_str=filter_str
+        ).get_results()
+        if not docs:
+            return
 
-        return {
-            "query": {
-                "bool": {
-                    "must": [
-                        {"term": {term_key: {"value": self.youtube_id}}},
-                        {
-                            "term": {
-                                "player.watched": {
-                                    "value": not self.is_watched
-                                }
-                            }
-                        },
-                    ],
-                }
-            }
-        }
+        for doc in docs:
+            player = dict(doc.get("player") or {})
+            player["watched"] = self.is_watched
+            if self.is_watched:
+                player["watched_date"] = self.stamp
+            doc["player"] = player
 
-    def _add_pipeline(self):
-        """add ingest pipeline"""
-        data = {
-            "description": f"{self.youtube_id}: watched {self.is_watched}",
-            "processors": [
-                {
-                    "set": {
-                        "field": "player.watched",
-                        "value": self.is_watched,
-                    }
-                },
-                {
-                    "set": {
-                        "field": "player.watched_date",
-                        "value": self.stamp,
-                    }
-                },
-            ],
-        }
-        _, _ = ElasticWrap(self.pipeline).put(data)
-
-    def _delete_pipeline(self):
-        """delete pipeline"""
-        ElasticWrap(self.pipeline).delete()
+        MeiliIndex("ta_video").add_documents(docs)
+        print(
+            f"{self.youtube_id}: updated watched={self.is_watched} on {len(docs)} videos"
+        )

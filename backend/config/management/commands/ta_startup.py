@@ -11,10 +11,9 @@ from time import sleep
 
 from appsettings.src.config import AppConfig, ReleaseVersion
 from appsettings.src.index_setup import ElasticIndexWrap
-from appsettings.src.snapshot import ElasticSnapshot
 from channel.src.index import YoutubeChannel
 from common.src.env_settings import EnvironmentSettings
-from common.src.es_connect import ElasticWrap, IndexPaginate
+from common.src.es_connect import IndexPaginate, MeiliIndex
 from common.src.helper import clear_dl_cache, get_channels
 from common.src.ta_redis import RedisArchivist
 from django.conf import settings
@@ -49,7 +48,6 @@ class Command(BaseCommand):
         self._clear_dl_cache()
         self._version_check()
         self._index_setup()
-        self._snapshot_check()
         self._create_default_schedules()
         self._update_schedule_tz()
         self._init_app_config()
@@ -192,14 +190,9 @@ class Command(BaseCommand):
         self.stdout.write("[6] validate index mappings")
         ElasticIndexWrap().setup()
 
-    def _snapshot_check(self):
-        """migration setup snapshots"""
-        self.stdout.write("[7] setup snapshots")
-        ElasticSnapshot().setup()
-
     def _create_default_schedules(self) -> None:
         """create default schedules for new installations"""
-        self.stdout.write("[8] create initial schedules")
+        self.stdout.write("[7] create initial schedules")
         init_has_run = CustomPeriodicTask.objects.filter(
             name="version_check"
         ).exists()
@@ -250,7 +243,7 @@ class Command(BaseCommand):
 
     def _update_schedule_tz(self) -> None:
         """update timezone for Schedule instances"""
-        self.stdout.write("[9] validate schedules TZ")
+        self.stdout.write("[8] validate schedules TZ")
         tz = EnvironmentSettings.TZ
         to_update = CrontabSchedule.objects.exclude(timezone=tz)
 
@@ -267,20 +260,20 @@ class Command(BaseCommand):
         PeriodicTasks.update_changed()
 
     def _init_app_config(self) -> None:
-        """init default app config to ES"""
-        self.stdout.write("[10] Check AppConfig")
-        response, status_code = ElasticWrap("ta_config/_doc/appsettings").get()
-        if status_code in [200, 201]:
+        """init default app config to Redis"""
+        self.stdout.write("[9] Check AppConfig")
+        config = AppConfig()
+        if config.config:
             self.stdout.write(
                 self.style.SUCCESS("    skip completed appsettings init")
             )
-            updated_defaults = AppConfig().add_new_defaults()
+            updated_defaults = config.add_new_defaults()
             for new_default in updated_defaults:
                 self.stdout.write(
                     self.style.SUCCESS(f"    added new default: {new_default}")
                 )
 
-            cleared = AppConfig().clear_old_keys()
+            cleared = config.clear_old_keys()
             for removed_key in cleared:
                 self.stdout.write(
                     self.style.SUCCESS(f"    removed old key: {removed_key}")
@@ -288,25 +281,14 @@ class Command(BaseCommand):
 
             return
 
-        if status_code != 404:
-            message = "    🗙 ta_config index lookup failed"
-            self.stdout.write(self.style.ERROR(message))
-            self.stdout.write(response)
-            sleep(60)
-            raise CommandError(message)
-
-        handler = AppConfig.__new__(AppConfig)
-        _, status_code = handler.sync_defaults()
+        config.sync_defaults()
         self.stdout.write(
             self.style.SUCCESS("    ✓ Created default appsettings.")
-        )
-        self.stdout.write(
-            self.style.SUCCESS(f"      Status code: {status_code}")
         )
 
     def _set_ta_startup_time(self) -> None:
         """set startup time to trigger frontend refresh, threadsafe"""
-        self.stdout.write("[11] Set startup timestamp")
+        self.stdout.write("[10] Set startup timestamp")
         message = str(int(datetime.now().timestamp() // 10 * 10))
         RedisArchivist().set_message(
             "STARTTIMESTAMP", message=message, save=True
@@ -315,115 +297,175 @@ class Command(BaseCommand):
             self.style.SUCCESS(f"    ✓ set timestamp to {message}.")
         )
 
+    # ------------------------------------------------------------------
+    # Migrations: all Painless _update_by_query replaced with
+    #   fetch-in-Python → update fields → re-index
+    # ------------------------------------------------------------------
+
     def _mig_add_default_playlist_sort(self) -> None:
         """migrate from 0.5.4 to 0.5.5 set default playlist sortorder"""
-        self._run_migration(
-            index_name="ta_playlist",
-            desc="set default playlist sort order",
-            query={
-                "bool": {
-                    "must_not": [{"exists": {"field": "playlist_sort_order"}}]
-                }
-            },
-            script={
-                "source": "ctx._source.playlist_sort_order = 'top'",
-                "lang": "painless",
-            },
-        )
+        desc = "set default playlist sort order"
+        self.stdout.write(f"[MIGRATION] run {desc}")
+        docs = IndexPaginate("ta_playlist", {}).get_results()
+        updated = [
+            {**d, "playlist_sort_order": "top"}
+            for d in docs
+            if not d.get("playlist_sort_order")
+        ]
+        if updated:
+            MeiliIndex("ta_playlist").add_documents(updated)
+            self.stdout.write(
+                self.style.SUCCESS(f"    ✓ updated {len(updated)} playlists")
+            )
+        else:
+            self.stdout.write(
+                self.style.SUCCESS("    no items needed updating")
+            )
 
     def _mig_set_channel_tabs(self) -> None:
         """migrate from 0.5.4 to 0.5.5 set initial channel tabs"""
+        desc = "set default channel_tabs in channel index"
+        self.stdout.write(f"[MIGRATION] run {desc}")
         tabs = VideoTypeEnum.values_known()
-        self._run_migration(
-            index_name="ta_channel",
-            desc="set default channel_tabs in channel index",
-            query={
-                "bool": {"must_not": [{"exists": {"field": "channel_tabs"}}]}
-            },
-            script={
-                "source": f"ctx._source.channel_tabs = {tabs}",
-                "lang": "painless",
-            },
-        )
+        docs = IndexPaginate("ta_channel", {}).get_results()
+        updated = [
+            {**d, "channel_tabs": tabs}
+            for d in docs
+            if not d.get("channel_tabs")
+        ]
+        if updated:
+            MeiliIndex("ta_channel").add_documents(updated)
+            self.stdout.write(
+                self.style.SUCCESS(f"    ✓ updated {len(updated)} channels")
+            )
+        else:
+            self.stdout.write(
+                self.style.SUCCESS("    no items needed updating")
+            )
 
     def _mig_set_video_channel_tabs(self) -> None:
         """migrate from 0.5.4 to 0.5.5 set initial video channel tabs"""
+        desc = "set default channel_tabs for videos"
+        self.stdout.write(f"[MIGRATION] run {desc}")
         tabs = VideoTypeEnum.values_known()
-        self._run_migration(
-            index_name="ta_video",
-            desc="set default channel_tabs for videos",
-            query={
-                "bool": {
-                    "must_not": [{"exists": {"field": "channel.channel_tabs"}}]
-                }
-            },
-            script={
-                "source": f"ctx._source.channel.channel_tabs = {tabs}",
-                "lang": "painless",
-            },
-        )
+        docs = IndexPaginate("ta_video", {}).get_results()
+        updated = []
+        for d in docs:
+            channel = d.get("channel") or {}
+            if not channel.get("channel_tabs"):
+                channel["channel_tabs"] = tabs
+                d["channel"] = channel
+                updated.append(d)
+        if updated:
+            MeiliIndex("ta_video").add_documents(updated)
+            self.stdout.write(
+                self.style.SUCCESS(f"    ✓ updated {len(updated)} videos")
+            )
+        else:
+            self.stdout.write(
+                self.style.SUCCESS("    no items needed updating")
+            )
 
     def _mig_fix_playlist_description(self) -> None:
         """migrate from 0.5.8 to 0.5.9 fix playlist desc null data type"""
-        self._run_migration(
-            index_name="ta_playlist",
-            desc="fix playlist description data type",
-            query={"term": {"playlist_description": {"value": False}}},
-            script={
-                "source": "ctx._source.remove('playlist_description')",
-                "lang": "painless",
-            },
-        )
+        desc = "fix playlist description data type"
+        self.stdout.write(f"[MIGRATION] run {desc}")
+        docs = IndexPaginate("ta_playlist", {}).get_results()
+        updated = []
+        for d in docs:
+            if d.get("playlist_description") is False:
+                d.pop("playlist_description", None)
+                updated.append(d)
+        if updated:
+            MeiliIndex("ta_playlist").add_documents(updated)
+            self.stdout.write(
+                self.style.SUCCESS(f"    ✓ updated {len(updated)} playlists")
+            )
+        else:
+            self.stdout.write(
+                self.style.SUCCESS("    no items needed updating")
+            )
 
     def _mig_fix_missing_stats(self) -> None:
         """migrate from 0.5.8 to 0.5.9, fix missing stats values"""
+        desc = "fix missing stats fields"
+        self.stdout.write(f"[MIGRATION] run {desc}")
         fields = [
             "like_count",
             "average_rating",
             "view_count",
             "dislike_count",
         ]
-        for field in fields:
-            self._run_migration(
-                index_name="ta_video",
-                desc=f"fix missing stats field {field}",
-                query={
-                    "bool": {
-                        "must_not": [{"exists": {"field": f"stats.{field}"}}]
-                    }
-                },
-                script={
-                    "source": f"ctx._source.stats.{field} = 0",
-                    "lang": "painless",
-                },
+        docs = IndexPaginate("ta_video", {}).get_results()
+        updated = []
+        for d in docs:
+            stats = d.get("stats") or {}
+            changed = False
+            for field in fields:
+                if field not in stats:
+                    stats[field] = 0
+                    changed = True
+            if changed:
+                d["stats"] = stats
+                updated.append(d)
+        if updated:
+            MeiliIndex("ta_video").add_documents(updated)
+            self.stdout.write(
+                self.style.SUCCESS(f"    ✓ updated {len(updated)} videos")
+            )
+        else:
+            self.stdout.write(
+                self.style.SUCCESS("    no items needed updating")
             )
 
     def _mig_fix_channel_art_types(self) -> None:
         """migrate from 0.5.8 to 0.5.9, fix channel artwork types"""
-        fields = [
+        desc = "fix channel artwork types"
+        self.stdout.write(f"[MIGRATION] run {desc}")
+        art_fields = [
             "channel_banner_url",
             "channel_thumb_url",
             "channel_tvart_url",
         ]
-        for field in fields:
-            self._run_migration(
-                index_name="ta_channel",
-                desc=f"fix missing data type for field {field}",
-                query={"term": {field: {"value": False}}},
-                script={
-                    "source": f"ctx._source.remove('{field}')",
-                    "lang": "painless",
-                },
+
+        # Fix channel index
+        channel_docs = IndexPaginate("ta_channel", {}).get_results()
+        updated_channels = []
+        for d in channel_docs:
+            changed = False
+            for field in art_fields:
+                if d.get(field) is False:
+                    d.pop(field, None)
+                    changed = True
+            if changed:
+                updated_channels.append(d)
+        if updated_channels:
+            MeiliIndex("ta_channel").add_documents(updated_channels)
+
+        # Fix video index (channel sub-object)
+        video_docs = IndexPaginate("ta_video", {}).get_results()
+        updated_videos = []
+        for d in video_docs:
+            channel = d.get("channel") or {}
+            changed = False
+            for field in art_fields:
+                if channel.get(field) is False:
+                    channel.pop(field, None)
+                    changed = True
+            if changed:
+                d["channel"] = channel
+                updated_videos.append(d)
+        if updated_videos:
+            MeiliIndex("ta_video").add_documents(updated_videos)
+
+        total = len(updated_channels) + len(updated_videos)
+        if total:
+            self.stdout.write(
+                self.style.SUCCESS(f"    ✓ updated {total} documents")
             )
-            source = f"""
-                if (ctx._source.containsKey('channel'))
-                {{ctx._source.channel.remove('{field}');}}
-            """
-            self._run_migration(
-                index_name="ta_video",
-                desc=f"fix missing data type for field channel.{field}",
-                query={"term": {f"channel.{field}": {"value": False}}},
-                script={"source": source, "lang": "painless"},
+        else:
+            self.stdout.write(
+                self.style.SUCCESS("    no items needed updating")
             )
 
     def _mig_fix_channel_description(self) -> None:
@@ -457,20 +499,20 @@ class Command(BaseCommand):
         desc = "fix video description null value"
         self.stdout.write(f"[MIGRATION] run {desc}")
 
-        data = {"_source": ["youtube_id", "description"]}
-        videos = IndexPaginate("ta_video", data=data).get_results()
+        docs = IndexPaginate("ta_video", {}).get_results()
 
         counter = 0
-        for video_response in videos:
+        updated = []
+        for video_response in docs:
             if not video_response.get("description") == "":
                 continue
 
-            video = YoutubeVideo(youtube_id=video_response["youtube_id"])
-            video.get_from_es()
-            video.json_data.pop("description")
-            video.upload_to_es()
-
+            video_response.pop("description")
+            updated.append(video_response)
             counter += 1
+
+        if updated:
+            MeiliIndex("ta_video").add_documents(updated)
 
         if counter:
             suc_msg = f"    ✓ updated {counter} videos"
@@ -478,30 +520,3 @@ class Command(BaseCommand):
         else:
             noop_msg = "    no items needed updating"
             self.stdout.write(self.style.SUCCESS(noop_msg))
-
-    def _run_migration(
-        self, index_name: str, desc: str, query: dict, script: dict
-    ):
-        """run migration"""
-        self.stdout.write(f"[MIGRATION] run {desc}")
-        path = f"{index_name}/_update_by_query?wait_for_completion=true"
-        data = {"query": query, "script": script}
-        response, status_code = ElasticWrap(path).post(data)
-        if status_code in [200, 201]:
-            updated = response.get("updated")
-            if updated:
-                suc_msg = f"    ✓ updated {updated} docs in {index_name}"
-                self.stdout.write(self.style.SUCCESS(suc_msg))
-
-                # ensure index consistency
-                ElasticWrap(f"{index_name}/_refresh").post()
-            else:
-                noop_msg = f"    no items in {index_name} need updating"
-                self.stdout.write(self.style.SUCCESS(noop_msg))
-            return
-
-        message = f"    🗙 failed to run {desc} on index {index_name}"
-        self.stdout.write(self.style.ERROR(message))
-        self.stdout.write(response)
-        sleep(60)
-        raise CommandError(message)

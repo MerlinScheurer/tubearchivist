@@ -512,7 +512,11 @@ class YoutubeVideo(YouTubeItem, YoutubeSubtitle):
         ThumbManager(self.youtube_id).embed_video_art(self.json_data)
 
 
-def index_new_video(youtube_id, video_type=VideoTypeEnum.VIDEOS):
+def index_new_video(
+    youtube_id,
+    video_type=VideoTypeEnum.VIDEOS,
+    youtube_meta_overwrite=None,
+):
     """combined classes to create new video in index"""
     from appsettings.src.reindex import Reindex
 
@@ -520,12 +524,21 @@ def index_new_video(youtube_id, video_type=VideoTypeEnum.VIDEOS):
     video.get_from_es(print_error=False)
     if video.json_data:
         # reindex only for force redownload
-        video = Reindex().reindex_single_video(youtube_id=youtube_id)
+        reindexed = Reindex().reindex_single_video(youtube_id=youtube_id)
+        if reindexed is not None:
+            video = reindexed
+        # else: reindex failed (video deactivated or no metadata); fall through
+        # to the json_data check below which will raise ValueError
+
     else:
-        video.build_json()
+        video.build_json(youtube_meta_overwrite=youtube_meta_overwrite)
 
     if not video.json_data:
-        raise ValueError("failed to get metadata for " + youtube_id)
+        error_detail = getattr(video, "error", None)
+        msg = f"failed to get metadata for {youtube_id}"
+        if error_detail:
+            msg += f": {error_detail}"
+        raise ValueError(msg)
 
     video.check_subtitles()
     url = video.json_data["vid_thumb_url"]
