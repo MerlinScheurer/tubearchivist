@@ -1,0 +1,174 @@
+{
+    "index_config": [
+        {
+            "index_name": "ta_config",
+            "primary_key": "config_uid",
+            "settings": {
+                "searchableAttributes": [],
+                "filterableAttributes": [],
+                "sortableAttributes": []
+            }
+        },
+        {
+            "index_name": "ta_channel",
+            "primary_key": "channel_id",
+            "settings": {
+                "searchableAttributes": [
+                    "channel_name",
+                    "channel_description",
+                    "channel_tags"
+                ],
+                "filterableAttributes": [
+                    "channel_id",
+                    "channel_active",
+                    "channel_subscribed",
+                    "channel_tabs",
+                    "channel_overwrites"
+                ],
+                "sortableAttributes": [
+                    "channel_name",
+                    "channel_last_refresh",
+                    "channel_subs"
+                ]
+            }
+        },
+        {
+            "index_name": "ta_video",
+            "primary_key": "youtube_id",
+            "settings": {
+                "searchableAttributes": [
+                    "title",
+                    "description",
+                    "tags",
+                    "category",
+                    "channel.channel_name"
+                ],
+                "filterableAttributes": [
+                    "youtube_id",
+                    "active",
+                    "vid_type",
+                    "published",
+                    "date_downloaded",
+                    "playlist",
+                    "category",
+                    "tags",
+                    "channel.channel_id",
+                    "channel.channel_active",
+                    "channel.channel_subscribed",
+                    "player.watched",
+                    "player.watched_date",
+                    "sponsorblock.is_enabled",
+                    "sponsorblock.has_unlocked"
+                ],
+                "sortableAttributes": [
+                    "published",
+                    "date_downloaded",
+                    "stats.view_count",
+                    "stats.like_count",
+                    "player.duration",
+                    "player.watched_date",
+                    "media_size",
+                    "vid_last_refresh",
+                    "streams.width",
+                    "streams.height"
+                ]
+            }
+        },
+        {
+            "index_name": "ta_download",
+            "primary_key": "youtube_id",
+            "settings": {
+                "searchableAttributes": [
+                    "title",
+                    "channel_name",
+                    "message"
+                ],
+                "filterableAttributes": [
+                    "youtube_id",
+                    "status",
+                    "vid_type",
+                    "channel_id",
+                    "channel_indexed",
+                    "auto_start",
+                    "published",
+                    "timestamp"
+                ],
+                "sortableAttributes": [
+                    "auto_start",
+                    "timestamp",
+                    "published",
+                    "channel_name",
+                    "title"
+                ]
+            }
+        },
+        {
+            "index_name": "ta_playlist",
+            "primary_key": "playlist_id",
+            "settings": {
+                "searchableAttributes": [
+                    "playlist_name",
+                    "playlist_description",
+                    "playlist_channel"
+                ],
+                "filterableAttributes": [
+                    "playlist_id",
+                    "playlist_active",
+                    "playlist_subscribed",
+                    "playlist_type",
+                    "playlist_channel_id",
+                    "playlist_sort_order"
+                ],
+                "sortableAttributes": [
+                    "playlist_name",
+                    "playlist_last_refresh"
+                ]
+            }
+        },
+        {
+            "index_name": "ta_subtitle",
+            "primary_key": "subtitle_fragment_id",
+            "settings": {
+                "searchableAttributes": [
+                    "subtitle_line",
+                    "title"
+                ],
+                "filterableAttributes": [
+                    "youtube_id",
+                    "subtitle_lang",
+                    "subtitle_source",
+                    "subtitle_channel_id",
+                    "subtitle_last_refresh"
+                ],
+                "sortableAttributes": [
+                    "subtitle_last_refresh",
+                    "subtitle_index"
+                ]
+            }
+        },
+        {
+            "index_name": "ta_comment",
+            "primary_key": "youtube_id",
+            "settings": {
+                "searchableAttributes": [
+                    "comment_comments.comment_text",
+                    "comment_comments.comment_author"
+                ],
+                "filterableAttributes": [
+                    "youtube_id",
+                    "comment_channel_id",
+                    "comment_last_refresh",
+                    "comment_comments.comment_id",
+                    "comment_comments.comment_parent",
+                    "comment_comments.comment_author_id",
+                    "comment_comments.comment_author_is_uploader",
+                    "comment_comments.comment_is_favorited",
+                    "comment_comments.comment_timestamp"
+                ],
+                "sortableAttributes": [
+                    "comment_last_refresh"
+                ]
+            }
+        }
+    ]
+}

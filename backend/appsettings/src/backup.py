@@ -21,8 +21,8 @@ class ElasticBackup:
     """dump index to json files for later bulk import"""
 
     INDEX_SIZE_CONF = {
-        "comment": 100,
-        "subtitle": 10000,
+        "ta_comment": 100,
+        "ta_subtitle": 10000,
     }
     CACHE_DIR = EnvironmentSettings.CACHE_DIR
     BACKUP_DIR = os.path.join(CACHE_DIR, "backup")
@@ -70,7 +70,7 @@ class ElasticBackup:
         if size_overwrite := self.INDEX_SIZE_CONF.get(index_name):
             paginate_kwargs.update({"size": size_overwrite})
 
-        paginate = IndexPaginate(f"ta_{index_name}", **paginate_kwargs)
+        paginate = IndexPaginate(index_name, **paginate_kwargs)
         _ = paginate.get_results()
 
     @staticmethod
@@ -78,7 +78,7 @@ class ElasticBackup:
         """get total documents in index"""
         try:
             client = get_meili_client()
-            stats = client.index(f"ta_{index_name}").get_stats()
+            stats = client.index(index_name).get_stats()
             return stats.number_of_documents
         except Exception:
             return 0
@@ -238,7 +238,7 @@ class ElasticBackup:
         """check if index already exists"""
         try:
             client = get_meili_client()
-            client.index(f"ta_{index_name}").get_stats()
+            client.index(index_name).get_stats()
             return True
         except Exception:
             return False
