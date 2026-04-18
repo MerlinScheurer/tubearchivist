@@ -19,6 +19,7 @@ from common.src.ta_redis import RedisQueue
 from download.src.thumbnails import ThumbManager
 from download.src.yt_dlp_base import CookieHandler
 from playlist.src.index import YoutubePlaylist
+from task.src.config_schedule import TaskSchedule
 from video.src.comments import Comments
 from video.src.index import YoutubeVideo
 
@@ -82,7 +83,6 @@ class ReindexPopulate(ReindexBase):
 
     def get_interval(self) -> None:
         """get reindex days interval from task"""
-        from task.src.config_schedule import TaskSchedule
 
         config = TaskSchedule.get_config("check_reindex")
         if config.get("days"):
