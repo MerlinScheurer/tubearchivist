@@ -18,7 +18,7 @@ from task.serializers import (
     TaskNotificationTestSerializer,
     TaskResultSerializer,
 )
-from task.src.config_schedule import CrontabValidator, ScheduleBuilder
+from task.src.config_schedule import TaskSchedule
 from task.src.notify import Notifications, get_all_notifications
 from task.src.task_config import TASK_CONFIG
 from task.src.task_manager import TaskCommand, TaskManager
@@ -241,16 +241,13 @@ class ScheduleView(ApiBaseView):
             return Response(error.data, status=400)
 
         try:
-            validator = CrontabValidator()
-            validator.validate_cron(cron_schedule)
-            validator.validate_config(task_name, schedule_config)
+            TaskSchedule.validate_cron(cron_schedule)
+            TaskSchedule.validate_config(task_name, schedule_config)
         except ValueError as err:
             error = ErrorResponseSerializer({"error": str(err)})
             return Response(error.data, status=400)
 
-        task = ScheduleBuilder().update_schedule(
-            task_name, cron_schedule, schedule_config
-        )
+        task = TaskSchedule.update(task_name, cron_schedule, schedule_config)
         message = f"update schedule for task {task_name}"
         if schedule_config:
             message += f" with config {schedule_config}"

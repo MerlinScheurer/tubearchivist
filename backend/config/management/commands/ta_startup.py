@@ -6,7 +6,6 @@ Functionality:
 
 import os
 from datetime import datetime
-from random import randint
 from time import sleep
 
 from appsettings.src.config import AppConfig, ReleaseVersion
@@ -19,10 +18,8 @@ from common.src.helper import clear_dl_cache, get_channels
 from common.src.ta_redis import RedisArchivist
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
-from django.utils import dateformat
-from django_celery_beat.models import CrontabSchedule, PeriodicTasks
 from task.models import CustomPeriodicTask
-from task.src.config_schedule import ScheduleBuilder
+from task.src.config_schedule import TaskSchedule
 from task.src.task_manager import TaskManager
 from task.tasks import version_check
 from video.src.constants import VideoTypeEnum
@@ -200,11 +197,9 @@ class Command(BaseCommand):
     def _create_default_schedules(self) -> None:
         """create default schedules for new installations"""
         self.stdout.write("[8] create initial schedules")
-        init_has_run = CustomPeriodicTask.objects.filter(
-            name="version_check"
-        ).exists()
+        created = TaskSchedule.create_defaults()
 
-        if init_has_run:
+        if not created:
             self.stdout.write(
                 self.style.SUCCESS(
                     "    schedule init already done, skipping..."
@@ -212,38 +207,12 @@ class Command(BaseCommand):
             )
             return
 
-        builder = ScheduleBuilder()
-        check_reindex = builder.get_set_task(
-            "check_reindex", schedule=builder.SCHEDULES["check_reindex"]
-        )
-        check_reindex.task_config.update({"days": 90})
-        check_reindex.last_run_at = dateformat.make_aware(datetime.now())
-        check_reindex.save()
-        self.stdout.write(
-            self.style.SUCCESS(
-                f"    ✓ created new default schedule: {check_reindex}"
+        for task_name in created:
+            self.stdout.write(
+                self.style.SUCCESS(
+                    f"    ✓ created new default schedule: {task_name}"
+                )
             )
-        )
-
-        thumbnail_check = builder.get_set_task(
-            "thumbnail_check", schedule=builder.SCHEDULES["thumbnail_check"]
-        )
-        thumbnail_check.last_run_at = dateformat.make_aware(datetime.now())
-        thumbnail_check.save()
-        self.stdout.write(
-            self.style.SUCCESS(
-                f"    ✓ created new default schedule: {thumbnail_check}"
-            )
-        )
-        daily_random = f"{randint(0, 59)} {randint(0, 23)} *"
-        version_check_task = builder.get_set_task(
-            "version_check", schedule=daily_random
-        )
-        self.stdout.write(
-            self.style.SUCCESS(
-                f"    ✓ created new default schedule: {version_check_task}"
-            )
-        )
         self.stdout.write(
             self.style.SUCCESS("    ✓ all default schedules created")
         )
@@ -251,20 +220,18 @@ class Command(BaseCommand):
     def _update_schedule_tz(self) -> None:
         """update timezone for Schedule instances"""
         self.stdout.write("[9] validate schedules TZ")
-        tz = EnvironmentSettings.TZ
-        to_update = CrontabSchedule.objects.exclude(timezone=tz)
+        updated = TaskSchedule.sync_timezone()
 
-        if not to_update.exists():
+        if not updated:
             self.stdout.write(
                 self.style.SUCCESS("    all schedules have correct TZ")
             )
             return
 
-        updated = to_update.update(timezone=tz)
+        tz = EnvironmentSettings.TZ
         self.stdout.write(
             self.style.SUCCESS(f"    ✓ updated {updated} schedules to {tz}.")
         )
-        PeriodicTasks.update_changed()
 
     def _init_app_config(self) -> None:
         """init default app config to ES"""

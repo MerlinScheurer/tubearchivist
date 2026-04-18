@@ -19,7 +19,6 @@ from common.src.ta_redis import RedisQueue
 from download.src.thumbnails import ThumbManager
 from download.src.yt_dlp_base import CookieHandler
 from playlist.src.index import YoutubePlaylist
-from task.models import CustomPeriodicTask
 from video.src.comments import Comments
 from video.src.index import YoutubeVideo
 
@@ -83,14 +82,11 @@ class ReindexPopulate(ReindexBase):
 
     def get_interval(self) -> None:
         """get reindex days interval from task"""
-        try:
-            task = CustomPeriodicTask.objects.get(name="check_reindex")
-        except CustomPeriodicTask.DoesNotExist:
-            return
+        from task.src.config_schedule import TaskSchedule
 
-        task_config = task.task_config
-        if task_config.get("days"):
-            self.interval = task_config.get("days")
+        config = TaskSchedule.get_config("check_reindex")
+        if config.get("days"):
+            self.interval = config.get("days")
 
     def add_recent(self) -> None:
         """add recent videos to refresh"""
