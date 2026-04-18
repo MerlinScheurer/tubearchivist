@@ -20,7 +20,7 @@ from drf_spectacular.utils import (
     extend_schema,
 )
 from rest_framework.response import Response
-from task.tasks import index_channel_playlists, subscribe_to
+from task.src.task_backend import TaskBackend
 
 
 class ChannelApiListView(ApiBaseView):
@@ -83,7 +83,11 @@ class ChannelApiListView(ApiBaseView):
 
         if pending:
             url_str = " ".join(pending)
-            subscribe_to.delay(url_str, expected_type="channel")
+            TaskBackend.dispatch(
+                "subscribe_to",
+                url_str=url_str,
+                expected_type="channel",
+            )
 
         return Response(data)
 
@@ -154,7 +158,10 @@ class ChannelApiView(ApiBaseView):
         if overwrites:
             channel_overwrites(channel_id, overwrites)
             if overwrites.get("index_playlists"):
-                index_channel_playlists.delay(channel_id)
+                TaskBackend.dispatch(
+                    "index_playlists",
+                    channel_id=channel_id,
+                )
 
         return Response(serializer.data, status=200)
 

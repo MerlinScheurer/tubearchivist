@@ -21,7 +21,7 @@ from common.views_base import AdminOnly, ApiBaseView
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from task.tasks import check_reindex
+from task.src.task_backend import TaskBackend
 
 
 class PingView(ApiBaseView):
@@ -106,12 +106,14 @@ class RefreshView(ApiBaseView):
         validated_data = data_serializer.validated_data
 
         extract_videos = validated_query.get("extract_videos")
-        task = check_reindex.delay(
-            data=validated_data, extract_videos=extract_videos
+        task = TaskBackend.dispatch(
+            "check_reindex",
+            data=validated_data,
+            extract_videos=extract_videos,
         )
         message = {
             "message": "reindex task started",
-            "task_id": task.id,
+            "task_id": task["task_id"],
         }
         serializer = AsyncTaskResponseSerializer(message)
 

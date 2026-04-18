@@ -10,7 +10,7 @@ from random import randint
 from celery.schedules import crontab
 from common.src.env_settings import EnvironmentSettings
 from django.utils import dateformat
-from django_celery_beat.models import CrontabSchedule, PeriodicTasks
+from django_celery_beat.models import CrontabSchedule, PeriodicTasks, cronexp
 from task.models import CustomPeriodicTask
 from task.src.task_config import TASK_CONFIG
 
@@ -101,6 +101,33 @@ class TaskSchedule:
         return task_crontab
 
     # --- CRUD ---
+
+    @classmethod
+    def get_all(cls):
+        """return queryset of all scheduled tasks"""
+        return CustomPeriodicTask.objects.all()
+
+    @classmethod
+    def get(cls, task_name: str) -> CustomPeriodicTask:
+        """get a single task by name, raises 404 if missing"""
+        from django.shortcuts import get_object_or_404
+
+        return get_object_or_404(CustomPeriodicTask, name=task_name)
+
+    @classmethod
+    def exists(cls, task_name: str) -> bool:
+        """check if a scheduled task exists"""
+        return CustomPeriodicTask.objects.filter(name=task_name).exists()
+
+    @classmethod
+    def has_run(cls, task_name: str) -> bool:
+        """check if task exists and has run at least once"""
+        try:
+            task = CustomPeriodicTask.objects.get(name=task_name)
+        except CustomPeriodicTask.DoesNotExist:
+            return False
+
+        return task.last_run_at is not None
 
     @classmethod
     def get_or_create(
@@ -215,3 +242,31 @@ class TaskSchedule:
         updated = to_update.update(timezone=tz)
         PeriodicTasks.update_changed()
         return updated
+
+    # --- serialization ---
+
+    @staticmethod
+    def _parse_schedule(task) -> str:
+        """parse crontab into '0 8 *' format"""
+        minute = cronexp(task.crontab.minute)
+        hour = cronexp(task.crontab.hour)
+        day_of_week = cronexp(task.crontab.day_of_week)
+        return f"{minute} {hour} {day_of_week}"
+
+    @classmethod
+    def to_dict(cls, task) -> dict:
+        """serialize a single task to a plain dict"""
+        return {
+            "name": task.name,
+            "schedule": cls._parse_schedule(task),
+            "schedule_human": str(task.crontab.human_readable),
+            "last_run_at": task.last_run_at,
+            "config": task.task_config,
+        }
+
+    @classmethod
+    def to_dict_list(cls, tasks=None) -> list[dict]:
+        """serialize all tasks to a list of dicts"""
+        if tasks is None:
+            tasks = cls.get_all()
+        return [cls.to_dict(task) for task in tasks]

@@ -27,8 +27,8 @@ from download.src.yt_dlp_base import CookieHandler
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework.authtoken.models import Token
 from rest_framework.response import Response
+from task.src.task_backend import TaskBackend
 from task.src.task_manager import TaskCommand
-from task.tasks import run_restore_backup
 
 
 class BackupApiListView(ApiBaseView):
@@ -118,11 +118,11 @@ class BackupApiView(ApiBaseView):
             error = ErrorResponseSerializer({"error": "file not found"})
             return Response(error.data, status=404)
 
-        task = run_restore_backup.delay(filename)
+        task = TaskBackend.dispatch("restore_backup", filename=filename)
         message = {
             "message": "backup restore task started",
             "filename": filename,
-            "task_id": task.id,
+            "task_id": task["task_id"],
         }
         return Response(message)
 

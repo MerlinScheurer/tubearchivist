@@ -18,10 +18,9 @@ from common.src.helper import clear_dl_cache, get_channels
 from common.src.ta_redis import RedisArchivist
 from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
-from task.models import CustomPeriodicTask
 from task.src.config_schedule import TaskSchedule
+from task.src.task_backend import TaskBackend
 from task.src.task_manager import TaskManager
-from task.tasks import version_check
 from video.src.constants import VideoTypeEnum
 from video.src.index import YoutubeVideo
 
@@ -176,13 +175,13 @@ class Command(BaseCommand):
         else:
             self.stdout.write(self.style.SUCCESS("    no new update found"))
 
-        version_task = CustomPeriodicTask.objects.filter(name="version_check")
-        if not version_task.exists():
+        version_task = TaskSchedule.exists("version_check")
+        if not version_task:
             return
 
-        if not version_task.first().last_run_at:
+        if not TaskSchedule.has_run("version_check"):
             self.style.SUCCESS("    ✓ send initial version check task")
-            version_check.delay()
+            TaskBackend.dispatch("version_check")
 
     def _index_setup(self):
         """migration: validate index mappings"""

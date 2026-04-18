@@ -22,6 +22,7 @@ from download.src.subscriptions import SubscriptionHandler, SubscriptionScanner
 from download.src.thumbnails import ThumbValidator
 from download.src.yt_dlp_handler import VideoDownloader
 from task.src.notify import Notifications
+from task.src.task_backend import TaskBackend
 from task.src.task_config import TASK_CONFIG
 from task.src.task_manager import TaskManager
 from video.src.meta_embed import MetadataEmbed
@@ -108,7 +109,7 @@ def update_subscribed(self):
     auto_start = handler.auto_start
     if added:
         if auto_start:
-            download_pending.delay(auto_only=True)
+            TaskBackend.dispatch("download_pending", auto_only=True)
 
         return f"Found {added} videos to add to the queue."
 
@@ -175,7 +176,7 @@ def extrac_dl(
     videos_added = pending_handler.parse_url_list(status=status)
 
     if auto_start:
-        download_pending.delay(auto_only=True)
+        TaskBackend.dispatch("download_pending", auto_only=True)
 
     if videos_added:
         return f"added {videos_added} Videos to Queue"
@@ -276,7 +277,7 @@ def rescan_filesystem(self, ignore_error, prefer_local):
     )
     handler.scan()
     handler.apply()
-    thumbnail_check.delay()
+    TaskBackend.dispatch("thumbnail_check")
 
 
 @shared_task(bind=True, name="thumbnail_check", base=BaseTask)

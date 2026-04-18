@@ -3,27 +3,17 @@
 # pylint: disable=abstract-method
 
 from rest_framework import serializers
-from task.models import CustomPeriodicTask
 from task.src.task_config import TASK_CONFIG
 
 
-class CustomPeriodicTaskSerializer(serializers.ModelSerializer):
-    """serialize CustomPeriodicTask"""
+class CustomPeriodicTaskSerializer(serializers.Serializer):
+    """serialize schedule data from TaskSchedule.to_dict"""
 
-    schedule = serializers.CharField(source="schedule_parsed")
-    schedule_human = serializers.CharField(source="crontab.human_readable")
-    last_run_at = serializers.DateTimeField()
-    config = serializers.DictField(source="task_config")
-
-    class Meta:
-        model = CustomPeriodicTask
-        fields = [
-            "name",
-            "schedule",
-            "schedule_human",
-            "last_run_at",
-            "config",
-        ]
+    name = serializers.CharField()
+    schedule = serializers.CharField()
+    schedule_human = serializers.CharField()
+    last_run_at = serializers.DateTimeField(allow_null=True)
+    config = serializers.DictField()
 
 
 class TaskResultSerializer(serializers.Serializer):

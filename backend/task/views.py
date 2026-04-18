@@ -5,10 +5,8 @@ from common.serializers import (
     ErrorResponseSerializer,
 )
 from common.views_base import AdminOnly, ApiBaseView
-from django.shortcuts import get_object_or_404
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework.response import Response
-from task.models import CustomPeriodicTask
 from task.serializers import (
     CustomPeriodicTaskSerializer,
     TaskCreateDataSerializer,
@@ -189,7 +187,7 @@ class ScheduleListView(ApiBaseView):
     )
     def get(self, request):
         """get all schedules"""
-        tasks = CustomPeriodicTask.objects.all()
+        tasks = TaskSchedule.to_dict_list()
         serializer = CustomPeriodicTaskSerializer(tasks, many=True)
         return Response(serializer.data)
 
@@ -213,8 +211,8 @@ class ScheduleView(ApiBaseView):
     )
     def get(self, request, task_name):
         """get single schedule by task_name"""
-        task = get_object_or_404(CustomPeriodicTask, name=task_name)
-        serializer = CustomPeriodicTaskSerializer(task)
+        task = TaskSchedule.get(task_name)
+        serializer = CustomPeriodicTaskSerializer(TaskSchedule.to_dict(task))
         return Response(serializer.data)
 
     @extend_schema(
@@ -254,7 +252,7 @@ class ScheduleView(ApiBaseView):
 
         print(message)
 
-        serializer = CustomPeriodicTaskSerializer(task)
+        serializer = CustomPeriodicTaskSerializer(TaskSchedule.to_dict(task))
         return Response(serializer.data)
 
     @extend_schema(
@@ -267,8 +265,7 @@ class ScheduleView(ApiBaseView):
     )
     def delete(self, request, task_name):
         """delete schedule by task_name"""
-        task = get_object_or_404(CustomPeriodicTask, name=task_name)
-        _ = task.delete()
+        TaskSchedule.delete(task_name)
 
         return Response(status=204)
 

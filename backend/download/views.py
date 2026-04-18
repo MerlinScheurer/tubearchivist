@@ -20,7 +20,7 @@ from download.serializers import (
 from download.src.queue_interact import PendingInteract
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework.response import Response
-from task.tasks import download_pending, extrac_dl
+from task.src.task_backend import TaskBackend
 
 
 class DownloadApiListView(ApiBaseView):
@@ -125,13 +125,17 @@ class DownloadApiListView(ApiBaseView):
         pending = [i["youtube_id"] for i in to_add if i["status"] == "pending"]
         url_str = " ".join(pending)
         print(f"url_str: {url_str}")
-        task = extrac_dl.delay(
-            url_str, auto_start=auto_start, flat=flat, force=force
+        task = TaskBackend.dispatch(
+            "extract_download",
+            youtube_ids=url_str,
+            auto_start=auto_start,
+            flat=flat,
+            force=force,
         )
 
         message = {
             "message": "add to queue task started",
-            "task_id": task.id,
+            "task_id": task["task_id"],
         }
         response_serializer = AsyncTaskResponseSerializer(message)
 
@@ -166,7 +170,7 @@ class DownloadApiListView(ApiBaseView):
         )
 
         if new_status == "priority":
-            download_pending.delay(auto_only=True)
+            TaskBackend.dispatch("download_pending", auto_only=True)
 
         return Response(status=204)
 
@@ -262,7 +266,11 @@ class DownloadApiView(ApiBaseView):
         item_status = validated_data["status"]
 
         if item_status == "ignore-force":
-            extrac_dl.delay(video_id, status="ignore")
+            TaskBackend.dispatch(
+                "extract_download",
+                youtube_ids=video_id,
+                status="ignore",
+            )
             return Response(data_serializer.data)
 
         _, status_code = PendingInteract(video_id).get_item()
@@ -275,7 +283,7 @@ class DownloadApiView(ApiBaseView):
         print(f"{video_id}: change status to {item_status}")
         PendingInteract(video_id, item_status).update_status()
         if item_status == "priority":
-            download_pending.delay(auto_only=True)
+            TaskBackend.dispatch("download_pending", auto_only=True)
 
         return Response(data_serializer.data)
 

@@ -21,7 +21,7 @@ from playlist.serializers import (
 from playlist.src.index import YoutubePlaylist
 from playlist.src.query_building import QueryBuilder
 from rest_framework.response import Response
-from task.tasks import subscribe_to
+from task.src.task_backend import TaskBackend
 from user.src.user_config import UserConfig
 
 
@@ -88,11 +88,15 @@ class PlaylistApiListView(ApiBaseView):
             return Response(error.data, status=400)
 
         url_str = " ".join(pending)
-        task = subscribe_to.delay(url_str, expected_type="playlist")
+        task = TaskBackend.dispatch(
+            "subscribe_to",
+            url_str=url_str,
+            expected_type="playlist",
+        )
 
         message = {
             "message": "playlist subscribe task started",
-            "task_id": task.id,
+            "task_id": task["task_id"],
         }
         serializer = AsyncTaskResponseSerializer(message)
 
