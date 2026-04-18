@@ -12,7 +12,7 @@ from appsettings.src.config import AppConfig, AppConfigType
 from channel.serializers import ChannelSerializer
 from channel.src.index import YoutubeChannel
 from common.src.env_settings import EnvironmentSettings
-from common.src.es_connect import ElasticWrap, IndexPaginate
+from common.src.es_connect import IndexPaginate, MeiliIndex
 from download.src.thumbnails import ThumbManager
 from mutagen.mp4 import MP4, MP4FreeForm
 from playlist.serializers import PlaylistSerializer
@@ -37,27 +37,24 @@ class MetadataEmbed:
 
     def embed(self):
         """entry point"""
-        data = {
-            "query": {"match_all": {}},
-            "_source": ["youtube_id"],
-        }
         paginate = IndexPaginate(
             index_name=self.INDEX_NAME,
-            data=data,
+            data={},
             size=100,
             callback=MetadataEmbedCallback,
             task=self.task,
             total=self._get_total(),
-            pit_keep_alive=1000,
         )
         _ = paginate.get_results()
 
     def _get_total(self):
         """get total documents in index"""
-        path = f"{self.INDEX_NAME}/_count"
-        response, _ = ElasticWrap(path).get()
-
-        return response.get("count")
+        response = MeiliIndex(self.INDEX_NAME).search("", {"limit": 0})
+        return (
+            response.get("totalHits")
+            or response.get("estimatedTotalHits")
+            or 0
+        )
 
 
 class MetadataEmbedCallback:
@@ -71,7 +68,7 @@ class MetadataEmbedCallback:
     def run(self):
         """run embed"""
         for video in self.source:
-            youtube_id = video["_source"]["youtube_id"]
+            youtube_id = video["youtube_id"]
             YoutubeVideo(youtube_id).embed_metadata()
 
 
@@ -375,8 +372,7 @@ class IndexFromEmbed:
                 )
 
             subtitle_str = parser.get_subtitle_str()
-            query_str = parser.create_bulk_import(to_index)
-            subs.index_subtitle(query_str)
+            subs.index_subtitle(to_index)
 
             media_url = subs.get_media_url(lang=embedded_lang)
             dest_path = os.path.join(self.VIDEOS_BASE, media_url)

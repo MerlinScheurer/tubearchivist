@@ -9,7 +9,7 @@ from time import sleep
 
 import requests
 from common.src.env_settings import EnvironmentSettings
-from common.src.es_connect import ElasticWrap, IndexPaginate
+from common.src.es_connect import IndexPaginate, MeiliIndex
 from common.src.helper import is_missing
 from mutagen.mp4 import MP4, MP4Cover
 from PIL import Image, ImageFile, UnidentifiedImageError
@@ -320,63 +320,38 @@ class ValidatorCallback:
     def _validate_videos(self):
         """check if video thumbnails are correct"""
         for video in self.source:
-            url = video["_source"]["vid_thumb_url"]
-            handler = ThumbManager(video["_source"]["youtube_id"])
+            url = video["vid_thumb_url"]
+            handler = ThumbManager(video["youtube_id"])
             handler.download_video_thumb(url, skip_existing=True)
 
     def _validate_channels(self):
         """check if all channel artwork is there"""
         for channel in self.source:
             urls = (
-                channel["_source"].get("channel_thumb_url"),
-                channel["_source"].get("channel_banner_url"),
-                channel["_source"].get("channel_tvart_url"),
+                channel.get("channel_thumb_url"),
+                channel.get("channel_banner_url"),
+                channel.get("channel_tvart_url"),
             )
-            handler = ThumbManager(channel["_source"]["channel_id"])
+            handler = ThumbManager(channel["channel_id"])
             handler.download_channel_art(urls, skip_existing=True)
 
     def _validate_playlists(self):
         """check if all playlist artwork is there"""
         for playlist in self.source:
-            url = playlist["_source"]["playlist_thumbnail"]
-            handler = ThumbManager(playlist["_source"]["playlist_id"])
+            url = playlist["playlist_thumbnail"]
+            handler = ThumbManager(playlist["playlist_id"])
             handler.download_playlist_thumb(url, skip_existing=True)
 
 
 class ThumbValidator:
     """validate thumbnails"""
 
+    # Each entry: index name + optional Meilisearch filter string
     INDEX = [
-        {
-            "data": {
-                "query": {"term": {"active": {"value": True}}},
-                "_source": ["vid_thumb_url", "youtube_id"],
-            },
-            "name": "ta_video",
-        },
-        {
-            "data": {
-                "query": {"term": {"channel_active": {"value": True}}},
-                "_source": {
-                    "excludes": ["channel_description", "channel_overwrites"]
-                },
-            },
-            "name": "ta_channel",
-        },
-        {
-            "data": {
-                "query": {"term": {"playlist_active": {"value": True}}},
-                "_source": ["playlist_id", "playlist_thumbnail"],
-            },
-            "name": "ta_playlist",
-        },
-        {
-            "data": {
-                "query": {"term": {"status": {"value": "pending"}}},
-                "_source": ["youtube_id", "vid_thumb_url"],
-            },
-            "name": "ta_download",
-        },
+        {"name": "ta_video", "filter_str": "active = true"},
+        {"name": "ta_channel", "filter_str": "channel_active = true"},
+        {"name": "ta_playlist", "filter_str": "playlist_active = true"},
+        {"name": "ta_download", "filter_str": "status = 'pending'"},
     ]
 
     def __init__(self, task=False):
@@ -385,13 +360,16 @@ class ThumbValidator:
     def validate(self):
         """validate all indexes"""
         for index in self.INDEX:
-            total = self._get_total(index["name"])
+            index_name = index["name"]
+            filter_str = index.get("filter_str")
+            total = self._get_total(index_name, filter_str)
             if not total:
                 continue
 
             paginate = IndexPaginate(
-                index_name=index["name"],
-                data=index["data"],
+                index_name=index_name,
+                data={},
+                filter_str=filter_str,
                 size=1000,
                 callback=ValidatorCallback,
                 task=self.task,
@@ -429,18 +407,20 @@ class ThumbValidator:
 
     @staticmethod
     def _get_vid_thumbs_should(video_folder: str) -> set[str]:
-        """get indexed"""
-        should_list = [
-            {"prefix": {"youtube_id": {"value": video_folder.lower()}}},
-            {"prefix": {"youtube_id": {"value": video_folder.upper()}}},
-        ]
-        data = {
-            "query": {"bool": {"should": should_list}},
-            "_source": ["youtube_id"],
+        """get indexed video ids whose id starts with video_folder letter"""
+        prefix = video_folder.lower()
+        # Meilisearch doesn't support prefix queries natively; filter by first
+        # character using a Python-side check after browsing the full index.
+        # For large instances this is acceptable — the same letter bucket is
+        # a small fraction of all videos.
+        results_video = IndexPaginate("ta_video", {}).get_results()
+        results_download = IndexPaginate("ta_download", {}).get_results()
+        all_docs = results_video + results_download
+        thumbs_should = {
+            doc["youtube_id"]
+            for doc in all_docs
+            if doc["youtube_id"][0].lower() == prefix
         }
-        result = IndexPaginate("ta_video,ta_download", data).get_results()
-        thumbs_should = {i["youtube_id"] for i in result}
-
         return thumbs_should
 
     def _clean_up_channels(self):
@@ -483,12 +463,17 @@ class ThumbValidator:
                 self.task.send_progress([message])
 
     @staticmethod
-    def _get_total(index_name):
-        """get total documents in index"""
-        path = f"{index_name}/_count"
-        response, _ = ElasticWrap(path).get()
-
-        return response.get("count")
+    def _get_total(index_name: str, filter_str: str = None) -> int:
+        """get total document count in index, optionally filtered"""
+        params = {"limit": 0}
+        if filter_str:
+            params["filter"] = filter_str
+        response = MeiliIndex(index_name).search("", params)
+        return (
+            response.get("totalHits")
+            or response.get("estimatedTotalHits")
+            or 0
+        )
 
 
 class ThumbFilesystem:
@@ -501,26 +486,25 @@ class ThumbFilesystem:
 
     def embed(self):
         """entry point"""
-        data = {
-            "query": {"match_all": {}},
-            "_source": ["media_url", "youtube_id", "channel.channel_id"],
-        }
+        total = self._get_total()
         paginate = IndexPaginate(
             index_name=self.INDEX_NAME,
-            data=data,
+            data={},
             size=100,
             callback=EmbedCallback,
             task=self.task,
-            total=self._get_total(),
+            total=total,
         )
         _ = paginate.get_results()
 
     def _get_total(self):
         """get total documents in index"""
-        path = f"{self.INDEX_NAME}/_count"
-        response, _ = ElasticWrap(path).get()
-
-        return response.get("count")
+        response = MeiliIndex(self.INDEX_NAME).search("", {"limit": 0})
+        return (
+            response.get("totalHits")
+            or response.get("estimatedTotalHits")
+            or 0
+        )
 
 
 class EmbedCallback:
@@ -536,5 +520,5 @@ class EmbedCallback:
     def run(self):
         """run embed"""
         for video in self.source:
-            video_id = video["_source"]["youtube_id"]
-            ThumbManager(video_id).embed_video_art(video["_source"])
+            video_id = video["youtube_id"]
+            ThumbManager(video_id).embed_video_art(video)

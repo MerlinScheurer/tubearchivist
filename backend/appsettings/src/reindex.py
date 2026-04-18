@@ -4,7 +4,6 @@ functionality:
 - index and update in es
 """
 
-import json
 import os
 from datetime import datetime
 from typing import TypedDict
@@ -13,7 +12,7 @@ from appsettings.src.config import AppConfig
 from channel.src.index import YoutubeChannel
 from channel.src.remote_query import get_last_channel_videos
 from common.src.env_settings import EnvironmentSettings
-from common.src.es_connect import ElasticWrap, IndexPaginate
+from common.src.es_connect import IndexPaginate, MeiliIndex
 from common.src.helper import rand_sleep
 from common.src.ta_redis import RedisQueue
 from download.src.thumbnails import ThumbManager
@@ -94,22 +93,25 @@ class ReindexPopulate(ReindexBase):
 
     def add_recent(self) -> None:
         """add recent videos to refresh"""
-        gte = datetime.fromtimestamp(self.now - self.DAYS3).date().isoformat()
-        must_list = [
-            {"term": {"active": {"value": True}}},
-            {"range": {"published": {"gte": gte}}},
-        ]
-        data = {
-            "size": 10000,
-            "query": {"bool": {"must": must_list}},
-            "sort": [{"published": {"order": "desc"}}],
-        }
-        response, _ = ElasticWrap("ta_video/_search").get(data=data)
-        hits = response["hits"]["hits"]
+        cutoff_date = (
+            datetime.fromtimestamp(self.now - self.DAYS3).date().isoformat()
+        )
+        # Meilisearch stores published as unix timestamp; convert date to timestamp
+        cutoff_ts = int(datetime.fromisoformat(cutoff_date).timestamp())
+        filter_str = f"active = true AND published >= {cutoff_ts}"
+        results = MeiliIndex("ta_video").search(
+            "",
+            {
+                "filter": filter_str,
+                "limit": 10000,
+                "sort": ["published:desc"],
+            },
+        )
+        hits = results.get("hits", [])
         if not hits:
             return
 
-        all_ids = [i["_source"]["youtube_id"] for i in hits]
+        all_ids = [i["youtube_id"] for i in hits]
         reindex_config: ReindexConfigType = self.REINDEX_CONFIG["video"]
         self.populate(all_ids, reindex_config)
 
@@ -123,23 +125,20 @@ class ReindexPopulate(ReindexBase):
 
     @staticmethod
     def _get_total_hits(reindex_config: ReindexConfigType) -> int:
-        """get total hits from index"""
+        """get total active hits from index"""
         index_name = reindex_config["index_name"]
         active_key = reindex_config["active_key"]
-        data = {
-            "query": {"term": {active_key: {"value": True}}},
-            "_source": False,
-        }
-        total = IndexPaginate(index_name, data, keep_source=True).get_results()
-
-        return len(total)
+        filter_str = f"{active_key} = true"
+        docs = IndexPaginate(
+            index_name, {}, filter_str=filter_str
+        ).get_results()
+        return len(docs)
 
     def _get_daily_should(self, total_hits: int) -> int:
         """calc how many should reindex daily"""
         daily_should = int((total_hits // self.interval + 1) * self.MULTIPLY)
         if daily_should >= 10000:
             daily_should = 9999
-
         return daily_should
 
     def _get_outdated_ids(
@@ -148,21 +147,26 @@ class ReindexPopulate(ReindexBase):
         """get outdated from index_name"""
         index_name = reindex_config["index_name"]
         refresh_key = reindex_config["refresh_key"]
-        now_lte = str(self.now - self.interval * 24 * 60 * 60)
-        must_list = [
-            {"match": {reindex_config["active_key"]: True}},
-            {"range": {refresh_key: {"lte": now_lte}}},
-        ]
-        data = {
-            "size": daily_should,
-            "query": {"bool": {"must": must_list}},
-            "sort": [{refresh_key: {"order": "asc"}}],
-            "_source": False,
+        active_key = reindex_config["active_key"]
+        now_lte = self.now - self.interval * 24 * 60 * 60
+        filter_str = f"{active_key} = true AND {refresh_key} <= {now_lte}"
+        results = MeiliIndex(index_name).search(
+            "",
+            {
+                "filter": filter_str,
+                "limit": daily_should,
+                "sort": [f"{refresh_key}:asc"],
+            },
+        )
+        hits = results.get("hits", [])
+        # Use the primary key field depending on index
+        pk_map = {
+            "ta_video": "youtube_id",
+            "ta_channel": "channel_id",
+            "ta_playlist": "playlist_id",
         }
-        response, _ = ElasticWrap(f"{index_name}/_search").get(data=data)
-
-        all_ids = [i["_id"] for i in response["hits"]["hits"]]
-        return all_ids
+        pk = pk_map.get(index_name, "youtube_id")
+        return [i[pk] for i in hits]
 
 
 class ReindexManual(ReindexBase):
@@ -234,20 +238,18 @@ class ReindexManual(ReindexBase):
 
     def _get_channel_videos(self, channel_id: str) -> list[str]:
         """get all videos from channel"""
-        data = {
-            "query": {"term": {"channel.channel_id": {"value": channel_id}}},
-            "_source": ["youtube_id"],
-        }
-        all_results = IndexPaginate("ta_video", data).get_results()
+        filter_str = f'channel.channel_id = "{channel_id}"'
+        all_results = IndexPaginate(
+            "ta_video", {}, filter_str=filter_str
+        ).get_results()
         return [i["youtube_id"] for i in all_results]
 
     def _get_playlist_videos(self, playlist_id: str) -> list[str]:
         """get all videos from playlist"""
-        data = {
-            "query": {"term": {"playlist.keyword": {"value": playlist_id}}},
-            "_source": ["youtube_id"],
-        }
-        all_results = IndexPaginate("ta_video", data).get_results()
+        filter_str = f'playlist = "{playlist_id}"'
+        all_results = IndexPaginate(
+            "ta_video", {}, filter_str=filter_str
+        ).get_results()
         return [i["youtube_id"] for i in all_results]
 
 
@@ -546,21 +548,26 @@ class ChannelFullScan:
         return all_local_videos
 
     def update(self):
-        """build bulk query for updates"""
+        """update vid_type for videos with mismatches"""
         if not self.to_update:
             print(f"{self.channel_id}: nothing to update")
             return
 
         print(f"{self.channel_id}: fixing {len(self.to_update)} videos")
-        bulk_list = []
-        for video in self.to_update:
-            action = {
-                "update": {"_id": video.get("video_id"), "_index": "ta_video"}
-            }
-            source = {"doc": {"vid_type": video.get("vid_type")}}
-            bulk_list.append(json.dumps(action))
-            bulk_list.append(json.dumps(source))
-        # add last newline
-        bulk_list.append("\n")
-        data = "\n".join(bulk_list)
-        _, _ = ElasticWrap("_bulk").post(data=data, ndjson=True)
+        video_ids = [v["video_id"] for v in self.to_update]
+        ids_str = ", ".join(f'"{i}"' for i in video_ids)
+        filter_str = f"youtube_id IN [{ids_str}]"
+        docs = IndexPaginate(
+            "ta_video", {}, filter_str=filter_str
+        ).get_results()
+
+        id_to_type = {v["video_id"]: v["vid_type"] for v in self.to_update}
+        updated = []
+        for doc in docs:
+            vid_id = doc["youtube_id"]
+            if vid_id in id_to_type:
+                doc["vid_type"] = id_to_type[vid_id]
+                updated.append(doc)
+
+        if updated:
+            MeiliIndex("ta_video").add_documents(updated)

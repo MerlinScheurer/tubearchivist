@@ -41,23 +41,19 @@ class ChannelApiListView(ApiBaseView):
     )
     def get(self, request):
         """get request"""
-        self.data.update(
-            {"sort": [{"channel_name.keyword": {"order": "asc"}}]}
-        )
+        self.data["sort"] = ["channel_name:asc"]
 
         serializer = ChannelListQuerySerializer(data=request.query_params)
         serializer.is_valid(raise_exception=True)
         validated_data = serializer.validated_data
 
-        must_list = []
         query_filter = validated_data.get("filter")
         if query_filter is not None:
-            channel_subscribed = query_filter == "subscribed"
-            must_list.append(
-                {"term": {"channel_subscribed": {"value": channel_subscribed}}}
+            channel_subscribed = (
+                "true" if query_filter == "subscribed" else "false"
             )
+            self.data["filter"] = f"channel_subscribed = {channel_subscribed}"
 
-        self.data["query"] = {"bool": {"must": must_list}}
         self.get_document_list(request)
         serializer = ChannelListSerializer(self.response)
 
@@ -193,19 +189,27 @@ class ChannelAggsApiView(ApiBaseView):
     )
     def get(self, request, channel_id):
         """get channel aggregations"""
-        self.data.update(
-            {
-                "query": {
-                    "term": {"channel.channel_id": {"value": channel_id}}
-                },
-                "aggs": {
-                    "total_items": {"value_count": {"field": "youtube_id"}},
-                    "total_size": {"sum": {"field": "media_size"}},
-                    "total_duration": {"sum": {"field": "player.duration"}},
-                },
-            }
+        from common.src.es_connect import IndexPaginate
+        from common.src.helper import get_duration_str
+
+        docs = IndexPaginate(
+            "ta_video", {}, filter_str=f"channel.channel_id = {channel_id!r}"
+        ).get_results()
+
+        total_items = len(docs)
+        total_size = sum(d.get("media_size") or 0 for d in docs)
+        total_duration = sum(
+            (d.get("player") or {}).get("duration") or 0 for d in docs
         )
-        self.get_aggs()
+
+        self.response = {
+            "total_items": {"value": total_items},
+            "total_size": {"value": total_size},
+            "total_duration": {
+                "value": int(total_duration),
+                "value_str": get_duration_str(total_duration),
+            },
+        }
         serializer = ChannelAggSerializer(self.response)
 
         return Response(serializer.data)

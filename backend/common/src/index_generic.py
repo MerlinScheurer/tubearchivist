@@ -6,7 +6,7 @@ functionality:
 import math
 
 from appsettings.src.config import AppConfig
-from common.src.es_connect import ElasticWrap
+from common.src.es_connect import MeiliIndex
 from download.src.yt_dlp_base import YtWrap
 from user.src.user_config import UserConfig
 
@@ -14,8 +14,8 @@ from user.src.user_config import UserConfig
 class YouTubeItem:
     """base class for youtube"""
 
-    es_path = False
     index_name = ""
+    primary_key = ""
     yt_base = ""
     yt_obs: dict[str, bool | str] = {
         "skip_download": True,
@@ -24,7 +24,6 @@ class YouTubeItem:
 
     def __init__(self, youtube_id):
         self.youtube_id = youtube_id
-        self.es_path = f"{self.index_name}/_doc/{youtube_id}"
         self.config = AppConfig().config
         self.error = None
         self.youtube_meta = False
@@ -41,9 +40,7 @@ class YouTubeItem:
         if self.config["downloads"]["extractor_lang"]:
             langs = self.config["downloads"]["extractor_lang"]
             langs_list = [i.strip() for i in langs.split(",")]
-            obs_request["extractor_args"] = {
-                "youtube": {"lang": langs_list}
-            }  # type: ignore
+            obs_request["extractor_args"] = {"youtube": {"lang": langs_list}}  # type: ignore
 
         if obs_overwrite:
             obs_request.update(obs_overwrite)
@@ -52,36 +49,64 @@ class YouTubeItem:
         self.youtube_meta, self.error = YtWrap(
             obs_request, self.config
         ).extract(url)
+        if self.error:
+            print(f"{self.youtube_id}: yt-dlp extract error: {self.error}")
 
     def get_from_es(self, print_error: bool = True) -> None:
-        """get indexed data from elastic search"""
-        print(f"{self.youtube_id}: get metadata from es")
-        resp, _ = ElasticWrap(f"{self.es_path}").get(print_error=print_error)
-        source = resp.get("_source")
-        self.json_data = source
+        """get indexed data from Meilisearch (kept as get_from_es for compatibility)"""
+        print(f"{self.youtube_id}: get metadata from meilisearch")
+        meili = MeiliIndex(self.index_name)
+        doc = meili.get_document(self.youtube_id)
+        if doc is None and print_error:
+            print(f"{self.youtube_id}: not found in {self.index_name}")
+        self.json_data = doc
 
     def upload_to_es(self):
-        """add json_data to elastic"""
-        _, _ = ElasticWrap(self.es_path).put(self.json_data, refresh=True)
+        """add json_data to Meilisearch (kept as upload_to_es for compatibility)"""
+        meili = MeiliIndex(self.index_name)
+        task = meili.add_document(self.json_data, primary_key=self.primary_key)
+        client = meili._client
+        task_uid = (
+            task.task_uid if hasattr(task, "task_uid") else task.get("taskUid")
+        )
+        if task_uid:
+            client.wait_for_task(task_uid)
 
     def deactivate(self):
-        """deactivate document in es"""
+        """deactivate document"""
         print(f"{self.youtube_id}: deactivate document")
         key_match = {
             "ta_video": "active",
             "ta_channel": "channel_active",
             "ta_playlist": "playlist_active",
         }
-        path = f"{self.index_name}/_update/{self.youtube_id}?refresh=true"
-        data = {
-            "script": f"ctx._source.{key_match.get(self.index_name)} = false"
-        }
-        _, _ = ElasticWrap(path).post(data)
+        field = key_match.get(self.index_name)
+        if not field:
+            return
+
+        meili = MeiliIndex(self.index_name)
+        doc = meili.get_document(self.youtube_id)
+        if doc:
+            doc[field] = False
+            task = meili.update_document(doc)
+            task_uid = (
+                task.task_uid
+                if hasattr(task, "task_uid")
+                else task.get("taskUid")
+            )
+            if task_uid:
+                meili._client.wait_for_task(task_uid)
 
     def del_in_es(self):
-        """delete item from elastic search"""
-        print(f"{self.youtube_id}: delete from es")
-        _, _ = ElasticWrap(self.es_path).delete(refresh=True)
+        """delete item from Meilisearch (kept as del_in_es for compatibility)"""
+        print(f"{self.youtube_id}: delete from meilisearch")
+        meili = MeiliIndex(self.index_name)
+        task = meili.delete_document(self.youtube_id)
+        task_uid = (
+            task.task_uid if hasattr(task, "task_uid") else task.get("taskUid")
+        )
+        if task_uid:
+            meili._client.wait_for_task(task_uid)
 
 
 class Pagination:
@@ -136,10 +161,6 @@ class Pagination:
         """validate pagination with total_hits after making api call"""
         page_get = self.page_get
         max_pages = math.ceil(total_hits / self.page_size)
-        if total_hits >= 10000:
-            # es returns maximal 10000 results
-            self.pagination["max_hits"] = True
-            max_pages = max_pages - 1
 
         if page_get < max_pages and max_pages > 1:
             self.pagination["last_page"] = max_pages

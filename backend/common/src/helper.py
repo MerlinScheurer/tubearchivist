@@ -160,10 +160,12 @@ def clear_dl_cache(cache_dir: str) -> int:
     return len(leftover_files)
 
 
-def get_mapping() -> dict:
-    """read index_mapping.json and get expected mapping and settings"""
-    with open("appsettings/index_mapping.json", "r", encoding="utf-8") as f:
-        index_config: dict = json.load(f).get("index_config")
+def get_mapping() -> list:
+    """read meili_index_config.json and return index_config list"""
+    with open(
+        "appsettings/meili_index_config.json", "r", encoding="utf-8"
+    ) as f:
+        index_config: list = json.load(f).get("index_config")
 
     return index_config
 
@@ -284,28 +286,27 @@ def is_missing(
     if isinstance(to_check, str):
         to_check = [to_check]
 
-    data = {
-        "query": {"terms": {on_key: to_check}},
-        "_source": [on_key],
-    }
-    result = IndexPaginate(index_name, data=data).get_results()
-    existing_ids = [i[on_key] for i in result]
-    dl = [i for i in to_check if i not in existing_ids]
+    # Build a Meilisearch filter: field IN ["id1", "id2", ...]
+    ids_str = ", ".join(f'"{i}"' for i in to_check)
+    filter_str = f"{on_key} IN [{ids_str}]"
 
+    # Support comma-separated multi-index names (browse each separately)
+    index_names = [n.strip() for n in index_name.split(",")]
+    existing_ids: list[str] = []
+    for idx in index_names:
+        result = IndexPaginate(idx, {}, filter_str=filter_str).get_results()
+        existing_ids.extend(i[on_key] for i in result if on_key in i)
+
+    dl = [i for i in to_check if i not in existing_ids]
     return dl
 
 
 def get_channel_overwrites() -> dict[str, dict[str, Any]]:
-    """get overwrites indexed my channel_id"""
-    data = {
-        "query": {
-            "bool": {"must": [{"exists": {"field": "channel_overwrites"}}]}
-        },
-        "_source": ["channel_id", "channel_overwrites"],
-    }
-    result = IndexPaginate("ta_channel", data).get_results()
+    """get overwrites indexed by channel_id"""
+    result = IndexPaginate(
+        "ta_channel", {}, filter_str="channel_overwrites EXISTS"
+    ).get_results()
     overwrites = {i["channel_id"]: i["channel_overwrites"] for i in result}
-
     return overwrites
 
 
@@ -313,21 +314,11 @@ def get_channels(
     subscribed_only: bool, source: list[str] | None = None
 ) -> list[dict]:
     """get a list of all channels"""
-    data = {
-        "sort": [{"channel_name.keyword": {"order": "asc"}}],
-    }
-    if subscribed_only:
-        query = {"term": {"channel_subscribed": {"value": True}}}
-    else:
-        query = {"match_all": {}}
-
-    data["query"] = query  # type: ignore
-
-    if source:
-        data["_source"] = source  # type: ignore
-
-    all_channels = IndexPaginate("ta_channel", data).get_results()
-
+    filter_str = "channel_subscribed = true" if subscribed_only else None
+    kwargs: dict = {}
+    if filter_str:
+        kwargs["filter_str"] = filter_str
+    all_channels = IndexPaginate("ta_channel", {}, **kwargs).get_results()
     return all_channels
 
 
@@ -335,21 +326,13 @@ def get_playlists(
     subscribed_only: bool, source: list[str] | None = None
 ) -> list[dict]:
     """get list of playlists"""
-
-    data = {
-        "sort": [{"playlist_channel.keyword": {"order": "desc"}}],
-    }
-
-    must_list = [{"term": {"playlist_active": {"value": True}}}]
+    filter_parts = ["playlist_active = true"]
     if subscribed_only:
-        must_list.append({"term": {"playlist_subscribed": {"value": True}}})
-
-    data = {"query": {"bool": {"must": must_list}}}  # type: ignore
-    if source:
-        data["_source"] = source  # type: ignore
-
-    all_playlists = IndexPaginate("ta_playlist", data).get_results()
-
+        filter_parts.append("playlist_subscribed = true")
+    filter_str = " AND ".join(filter_parts)
+    all_playlists = IndexPaginate(
+        "ta_playlist", {}, filter_str=filter_str
+    ).get_results()
     return all_playlists
 
 

@@ -1,373 +1,324 @@
-"""aggregations"""
+"""aggregations — computed in Python from Meilisearch browse results"""
+
+from collections import defaultdict
+from datetime import datetime, timedelta
 
 from common.src.env_settings import EnvironmentSettings
-from common.src.es_connect import ElasticWrap
+from common.src.es_connect import IndexPaginate, MeiliIndex
 from common.src.helper import get_duration_str
-from django.conf import settings
 
 
-class AggBase:
-    """base class for aggregation calls"""
-
-    path: str = ""
-    data: dict = {}
-    name: str = ""
-
-    def get(self):
-        """make get call"""
-        response, _ = ElasticWrap(self.path).get(self.data)
-        if settings.DEBUG:
-            print(
-                f"[agg][{self.name}] took {response.get('took')} ms to process"
-            )
-
-        return response.get("aggregations")
-
-    def process(self):
-        """implement in subclassess"""
-        raise NotImplementedError
-
-
-class Video(AggBase):
+class Video:
     """get video stats"""
 
     name = "video_stats"
-    path = "ta_video/_search"
-    data = {
-        "size": 0,
-        "aggs": {
-            "video_type": {
-                "terms": {"field": "vid_type"},
-                "aggs": {
-                    "media_size": {"sum": {"field": "media_size"}},
-                    "duration": {"sum": {"field": "player.duration"}},
-                },
-            },
-            "video_active": {
-                "terms": {"field": "active"},
-                "aggs": {
-                    "media_size": {"sum": {"field": "media_size"}},
-                    "duration": {"sum": {"field": "player.duration"}},
-                },
-            },
-            "video_media_size": {"sum": {"field": "media_size"}},
-            "video_count": {"value_count": {"field": "youtube_id"}},
-            "duration": {"sum": {"field": "player.duration"}},
-        },
-    }
 
     def process(self):
-        """process aggregation"""
-        aggregations = self.get()
-        if not aggregations:
+        """compute video aggregations"""
+        docs = IndexPaginate("ta_video", {}).get_results()
+        if not docs:
             return None
 
-        duration = int(aggregations["duration"]["value"])
-        response = {
-            "doc_count": aggregations["video_count"]["value"],
-            "media_size": int(aggregations["video_media_size"]["value"]),
-            "duration": duration,
-            "duration_str": get_duration_str(duration),
-        }
-        for bucket in aggregations["video_type"]["buckets"]:
-            duration = int(bucket["duration"].get("value"))
-            response.update(
-                {
-                    f"type_{bucket['key']}": {
-                        "doc_count": bucket.get("doc_count"),
-                        "media_size": int(bucket["media_size"].get("value")),
-                        "duration": duration,
-                        "duration_str": get_duration_str(duration),
-                    }
-                }
-            )
+        total_size = 0
+        total_duration = 0
+        total_count = len(docs)
+        by_type: dict = defaultdict(
+            lambda: {"doc_count": 0, "media_size": 0, "duration": 0}
+        )
+        by_active: dict = defaultdict(
+            lambda: {"doc_count": 0, "media_size": 0, "duration": 0}
+        )
 
-        for bucket in aggregations["video_active"]["buckets"]:
-            duration = int(bucket["duration"].get("value"))
-            response.update(
-                {
-                    f"active_{bucket['key_as_string']}": {
-                        "doc_count": bucket.get("doc_count"),
-                        "media_size": int(bucket["media_size"].get("value")),
-                        "duration": duration,
-                        "duration_str": get_duration_str(duration),
-                    }
-                }
-            )
+        for doc in docs:
+            size = doc.get("media_size") or 0
+            duration = (doc.get("player") or {}).get("duration") or 0
+            vid_type = doc.get("vid_type") or "unknown"
+            active = str(doc.get("active", False)).lower()
+
+            total_size += size
+            total_duration += duration
+
+            by_type[vid_type]["doc_count"] += 1
+            by_type[vid_type]["media_size"] += size
+            by_type[vid_type]["duration"] += duration
+
+            by_active[active]["doc_count"] += 1
+            by_active[active]["media_size"] += size
+            by_active[active]["duration"] += duration
+
+        response = {
+            "doc_count": total_count,
+            "media_size": total_size,
+            "duration": total_duration,
+            "duration_str": get_duration_str(total_duration),
+        }
+
+        for vtype, data in by_type.items():
+            dur = int(data["duration"])
+            response[f"type_{vtype}"] = {
+                "doc_count": data["doc_count"],
+                "media_size": data["media_size"],
+                "duration": dur,
+                "duration_str": get_duration_str(dur),
+            }
+
+        for active_key, data in by_active.items():
+            dur = int(data["duration"])
+            response[f"active_{active_key}"] = {
+                "doc_count": data["doc_count"],
+                "media_size": data["media_size"],
+                "duration": dur,
+                "duration_str": get_duration_str(dur),
+            }
 
         return response
 
 
-class Channel(AggBase):
+class Channel:
     """get channel stats"""
 
     name = "channel_stats"
-    path = "ta_channel/_search"
-    data = {
-        "size": 0,
-        "aggs": {
-            "channel_count": {"value_count": {"field": "channel_id"}},
-            "channel_active": {"terms": {"field": "channel_active"}},
-            "channel_subscribed": {"terms": {"field": "channel_subscribed"}},
-        },
-    }
 
     def process(self):
-        """process aggregation"""
-        aggregations = self.get()
-        if not aggregations:
+        """compute channel aggregations"""
+        docs = IndexPaginate("ta_channel", {}).get_results()
+        if not docs:
             return None
 
-        response = {
-            "doc_count": aggregations["channel_count"].get("value"),
-        }
-        for bucket in aggregations["channel_active"]["buckets"]:
-            key = f"active_{bucket['key_as_string']}"
-            response.update({key: bucket.get("doc_count")})
-        for bucket in aggregations["channel_subscribed"]["buckets"]:
-            key = f"subscribed_{bucket['key_as_string']}"
-            response.update({key: bucket.get("doc_count")})
+        total_count = len(docs)
+        by_active: dict = defaultdict(int)
+        by_subscribed: dict = defaultdict(int)
+
+        for doc in docs:
+            active_key = str(doc.get("channel_active", False)).lower()
+            subscribed_key = str(doc.get("channel_subscribed", False)).lower()
+            by_active[active_key] += 1
+            by_subscribed[subscribed_key] += 1
+
+        response = {"doc_count": total_count}
+        for key, count in by_active.items():
+            response[f"active_{key}"] = count
+        for key, count in by_subscribed.items():
+            response[f"subscribed_{key}"] = count
 
         return response
 
 
-class Playlist(AggBase):
+class Playlist:
     """get playlist stats"""
 
     name = "playlist_stats"
-    path = "ta_playlist/_search"
-    data = {
-        "size": 0,
-        "aggs": {
-            "playlist_count": {"value_count": {"field": "playlist_id"}},
-            "playlist_active": {"terms": {"field": "playlist_active"}},
-            "playlist_subscribed": {"terms": {"field": "playlist_subscribed"}},
-        },
-    }
 
     def process(self):
-        """process aggregation"""
-        aggregations = self.get()
-        if not aggregations:
+        """compute playlist aggregations"""
+        docs = IndexPaginate("ta_playlist", {}).get_results()
+        if not docs:
             return None
 
-        response = {"doc_count": aggregations["playlist_count"].get("value")}
-        for bucket in aggregations["playlist_active"]["buckets"]:
-            key = f"active_{bucket['key_as_string']}"
-            response.update({key: bucket.get("doc_count")})
-        for bucket in aggregations["playlist_subscribed"]["buckets"]:
-            key = f"subscribed_{bucket['key_as_string']}"
-            response.update({key: bucket.get("doc_count")})
+        total_count = len(docs)
+        by_active: dict = defaultdict(int)
+        by_subscribed: dict = defaultdict(int)
+
+        for doc in docs:
+            active_key = str(doc.get("playlist_active", False)).lower()
+            subscribed_key = str(doc.get("playlist_subscribed", False)).lower()
+            by_active[active_key] += 1
+            by_subscribed[subscribed_key] += 1
+
+        response = {"doc_count": total_count}
+        for key, count in by_active.items():
+            response[f"active_{key}"] = count
+        for key, count in by_subscribed.items():
+            response[f"subscribed_{key}"] = count
 
         return response
 
 
-class Download(AggBase):
+class Download:
     """get downloads queue stats"""
 
     name = "download_queue_stats"
-    path = "ta_download/_search"
-    data = {
-        "size": 0,
-        "aggs": {
-            "status": {"terms": {"field": "status"}},
-            "video_type": {
-                "filter": {"term": {"status": "pending"}},
-                "aggs": {"type_pending": {"terms": {"field": "vid_type"}}},
-            },
-        },
-    }
 
     def process(self):
-        """process aggregation"""
-        aggregations = self.get()
-        response = {}
-        if not aggregations:
+        """compute download queue aggregations"""
+        docs = IndexPaginate("ta_download", {}).get_results()
+        if not docs:
             return None
 
-        for bucket in aggregations["status"]["buckets"]:
-            response.update({bucket["key"]: bucket.get("doc_count")})
+        by_status: dict = defaultdict(int)
+        pending_by_type: dict = defaultdict(int)
 
-        for bucket in aggregations["video_type"]["type_pending"]["buckets"]:
-            key = f"pending_{bucket['key']}"
-            response.update({key: bucket.get("doc_count")})
+        for doc in docs:
+            status = doc.get("status") or "unknown"
+            by_status[status] += 1
+            if status == "pending":
+                vid_type = doc.get("vid_type") or "unknown"
+                pending_by_type[vid_type] += 1
+
+        response = dict(by_status)
+        for vtype, count in pending_by_type.items():
+            response[f"pending_{vtype}"] = count
 
         return response
 
 
-class WatchProgress(AggBase):
+class WatchProgress:
     """get watch progress"""
 
     name = "watch_progress"
-    path = "ta_video/_search"
-    data = {
-        "size": 0,
-        "aggs": {
-            name: {
-                "terms": {"field": "player.watched"},
-                "aggs": {
-                    "watch_docs": {
-                        "filter": {"terms": {"player.watched": [True, False]}},
-                        "aggs": {
-                            "true_count": {"value_count": {"field": "_index"}},
-                            "duration": {"sum": {"field": "player.duration"}},
-                        },
-                    },
-                },
-            },
-            "total_duration": {"sum": {"field": "player.duration"}},
-            "total_vids": {"value_count": {"field": "_index"}},
-        },
-    }
 
     def process(self):
-        """make the call"""
-        aggregations = self.get()
-        response = {}
-        if not aggregations:
+        """compute watch progress aggregations"""
+        docs = IndexPaginate("ta_video", {}).get_results()
+        if not docs:
             return None
 
-        buckets = aggregations[self.name]["buckets"]
-        all_duration = int(aggregations["total_duration"].get("value"))
-        response.update(
+        total_duration = 0
+        total_items = len(docs)
+        watched_duration = 0
+        watched_items = 0
+        unwatched_duration = 0
+        unwatched_items = 0
+
+        for doc in docs:
+            duration = (doc.get("player") or {}).get("duration") or 0
+            watched = (doc.get("player") or {}).get("watched", False)
+            total_duration += duration
+            if watched:
+                watched_duration += duration
+                watched_items += 1
+            else:
+                unwatched_duration += duration
+                unwatched_items += 1
+
+        response = {
+            "total": {
+                "duration": total_duration,
+                "duration_str": get_duration_str(total_duration),
+                "items": total_items,
+            },
+            "watched": {
+                "duration": watched_duration,
+                "duration_str": get_duration_str(watched_duration),
+                "progress": (
+                    watched_duration / total_duration if total_duration else 0
+                ),
+                "items": watched_items,
+            },
+            "unwatched": {
+                "duration": unwatched_duration,
+                "duration_str": get_duration_str(unwatched_duration),
+                "progress": (
+                    unwatched_duration / total_duration
+                    if total_duration
+                    else 0
+                ),
+                "items": unwatched_items,
+            },
+        }
+
+        return response
+
+
+class DownloadHist:
+    """get downloads histogram last 7 days"""
+
+    name = "videos_last_week"
+
+    def process(self):
+        """compute last-7-days download histogram"""
+        tz_name = EnvironmentSettings.TZ
+        try:
+            from zoneinfo import ZoneInfo
+
+            tz = ZoneInfo(tz_name)
+        except Exception:
+            tz = None
+
+        now = datetime.now(tz) if tz else datetime.now()
+        cutoff = int((now - timedelta(days=7)).timestamp())
+
+        filter_str = f"date_downloaded >= {cutoff}"
+        docs = IndexPaginate(
+            "ta_video", {}, filter_str=filter_str
+        ).get_results()
+
+        by_day: dict = defaultdict(lambda: {"count": 0, "media_size": 0})
+        for doc in docs:
+            ts = doc.get("date_downloaded")
+            if not ts:
+                continue
+            if tz:
+                day = datetime.fromtimestamp(ts, tz).strftime("%Y-%m-%d")
+            else:
+                day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
+
+            by_day[day]["count"] += 1
+            by_day[day]["media_size"] += doc.get("media_size") or 0
+
+        # Return sorted descending, last 7 days only
+        response = [
             {
-                "total": {
-                    "duration": all_duration,
-                    "duration_str": get_duration_str(all_duration),
-                    "items": aggregations["total_vids"].get("value"),
-                }
+                "date": day,
+                "count": data["count"],
+                "media_size": data["media_size"],
+            }
+            for day, data in sorted(by_day.items(), reverse=True)
+        ]
+
+        return response
+
+
+class BiggestChannel:
+    """get channel aggregations by video count, duration, or media size"""
+
+    name = "channel_stats"
+    order_choices = ["doc_count", "duration", "media_size"]
+
+    def __init__(self, order):
+        if order not in self.order_choices:
+            order = "doc_count"
+        self.order = order
+
+    def process(self):
+        """compute per-channel aggregations"""
+        docs = IndexPaginate("ta_video", {}).get_results()
+        if not docs:
+            return None
+
+        channels: dict = defaultdict(
+            lambda: {
+                "name": "",
+                "doc_count": 0,
+                "duration": 0,
+                "media_size": 0,
             }
         )
 
-        for bucket in buckets:
-            response.update(self._build_bucket(bucket, all_duration))
+        for doc in docs:
+            channel = doc.get("channel") or {}
+            channel_id = channel.get("channel_id") or "unknown"
+            channel_name = channel.get("channel_name") or channel_id
+            duration = (doc.get("player") or {}).get("duration") or 0
+            size = doc.get("media_size") or 0
 
-        return response
-
-    @staticmethod
-    def _build_bucket(bucket, all_duration):
-        """parse bucket"""
-
-        duration = int(bucket["watch_docs"]["duration"]["value"])
-        duration_str = get_duration_str(duration)
-        items = bucket["watch_docs"]["true_count"]["value"]
-        if bucket["key_as_string"] == "false":
-            key = "unwatched"
-        else:
-            key = "watched"
-
-        bucket_parsed = {
-            key: {
-                "duration": duration,
-                "duration_str": duration_str,
-                "progress": duration / all_duration if all_duration else 0,
-                "items": items,
-            }
-        }
-
-        return bucket_parsed
-
-
-class DownloadHist(AggBase):
-    """get downloads histogram last week"""
-
-    name = "videos_last_week"
-    path = "ta_video/_search"
-    data = {
-        "size": 0,
-        "aggs": {
-            name: {
-                "date_histogram": {
-                    "field": "date_downloaded",
-                    "calendar_interval": "day",
-                    "format": "yyyy-MM-dd",
-                    "order": {"_key": "desc"},
-                    "time_zone": EnvironmentSettings.TZ,
-                },
-                "aggs": {
-                    "total_videos": {"value_count": {"field": "youtube_id"}},
-                    "media_size": {"sum": {"field": "media_size"}},
-                },
-            }
-        },
-        "query": {
-            "range": {
-                "date_downloaded": {
-                    "gte": "now-7d/d",
-                    "time_zone": EnvironmentSettings.TZ,
-                }
-            }
-        },
-    }
-
-    def process(self):
-        """process query"""
-        aggregations = self.get()
-        if not aggregations:
-            return None
-
-        buckets = aggregations[self.name]["buckets"]
+            channels[channel_id]["name"] = channel_name
+            channels[channel_id]["doc_count"] += 1
+            channels[channel_id]["duration"] += duration
+            channels[channel_id]["media_size"] += size
 
         response = [
             {
-                "date": i.get("key_as_string"),
-                "count": i.get("doc_count"),
-                "media_size": i["media_size"].get("value"),
+                "id": cid,
+                "name": data["name"].title(),
+                "doc_count": data["doc_count"],
+                "duration": data["duration"],
+                "duration_str": get_duration_str(int(data["duration"])),
+                "media_size": data["media_size"],
             }
-            for i in buckets
+            for cid, data in channels.items()
         ]
 
-        return response
-
-
-class BiggestChannel(AggBase):
-    """get channel aggregations"""
-
-    def __init__(self, order):
-        self.data["aggs"][self.name]["multi_terms"]["order"] = {order: "desc"}
-
-    name = "channel_stats"
-    path = "ta_video/_search"
-    data = {
-        "size": 0,
-        "aggs": {
-            name: {
-                "multi_terms": {
-                    "terms": [
-                        {"field": "channel.channel_name.keyword"},
-                        {"field": "channel.channel_id"},
-                    ],
-                    "order": {"doc_count": "desc"},
-                },
-                "aggs": {
-                    "doc_count": {"value_count": {"field": "_index"}},
-                    "duration": {"sum": {"field": "player.duration"}},
-                    "media_size": {"sum": {"field": "media_size"}},
-                },
-            },
-        },
-    }
-    order_choices = ["doc_count", "duration", "media_size"]
-
-    def process(self):
-        """process aggregation, order_by validated in the view"""
-
-        aggregations = self.get()
-        if not aggregations:
-            return None
-
-        buckets = aggregations[self.name]["buckets"]
-
-        response = [
-            {
-                "id": i["key"][1],
-                "name": i["key"][0].title(),
-                "doc_count": i["doc_count"]["value"],
-                "duration": i["duration"]["value"],
-                "duration_str": get_duration_str(int(i["duration"]["value"])),
-                "media_size": i["media_size"]["value"],
-            }
-            for i in buckets
-        ]
+        response.sort(key=lambda x: x[self.order], reverse=True)
 
         return response

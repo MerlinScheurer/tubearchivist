@@ -9,7 +9,7 @@ from datetime import datetime
 
 from channel.src.remote_query import get_last_channel_videos
 from common.src.env_settings import EnvironmentSettings
-from common.src.es_connect import ElasticWrap, IndexPaginate
+from common.src.es_connect import IndexPaginate, MeiliIndex
 from common.src.helper import rand_sleep
 from common.src.index_generic import YouTubeItem
 from download.src.thumbnails import ThumbManager
@@ -152,21 +152,19 @@ class YoutubeChannel(YouTubeItem):
 
     def sync_to_videos(self):
         """sync new channel_dict to all videos of channel"""
-        data = {
-            "query": {
-                "term": {"channel.channel_id": {"value": self.youtube_id}},
-            },
-            "script": {
-                "lang": "painless",
-                "params": {"channel": self.json_data},
-                "source": "ctx._source.channel = params.channel",
-            },
-        }
-        update_path = "ta_video/_update_by_query"
-        response, status_code = ElasticWrap(update_path).post(data)
-        if status_code not in [200, 201]:
-            print(f"sync to videos failed with status code {status_code}")
-            print(response)
+        filter_str = f'channel.channel_id = "{self.youtube_id}"'
+        all_videos = IndexPaginate(
+            "ta_video", {}, filter_str=filter_str
+        ).get_results()
+        if not all_videos:
+            return
+
+        updated = []
+        for video in all_videos:
+            video["channel"] = self.json_data
+            updated.append(video)
+
+        MeiliIndex("ta_video").add_documents(updated)
 
     def change_subscribe(self, new_subscribe_state: bool):
         """change subscribe status"""
@@ -249,13 +247,10 @@ class YoutubeChannel(YouTubeItem):
 
     def get_channel_videos(self):
         """get all videos from channel"""
-        data = {
-            "query": {
-                "term": {"channel.channel_id": {"value": self.youtube_id}}
-            },
-            "_source": ["youtube_id", "vid_type"],
-        }
-        all_videos = IndexPaginate("ta_video", data).get_results()
+        filter_str = f'channel.channel_id = "{self.youtube_id}"'
+        all_videos = IndexPaginate(
+            "ta_video", {}, filter_str=filter_str
+        ).get_results()
         return all_videos
 
     def get_overwrites(self) -> dict:
@@ -327,31 +322,19 @@ class ChannelDelete(YouTubeItem):
         return folder_path
 
     def _delete_es_videos(self):
-        """delete all channel documents from elasticsearch"""
-        data = {
-            "query": {
-                "term": {"channel.channel_id": {"value": self.youtube_id}}
-            }
-        }
-        _, _ = ElasticWrap("ta_video/_delete_by_query").post(data)
+        """delete all channel documents from meilisearch"""
+        filter_str = f'channel.channel_id = "{self.youtube_id}"'
+        MeiliIndex("ta_video").delete_documents_by_filter(filter_str)
 
     def _delete_es_comments(self):
         """delete all comments from this channel"""
-        data = {
-            "query": {
-                "term": {"comment_channel_id": {"value": self.youtube_id}}
-            }
-        }
-        _, _ = ElasticWrap("ta_comment/_delete_by_query").post(data)
+        filter_str = f'comment_channel_id = "{self.youtube_id}"'
+        MeiliIndex("ta_comment").delete_documents_by_filter(filter_str)
 
     def _delete_es_subtitles(self):
         """delete all subtitles from this channel"""
-        data = {
-            "query": {
-                "term": {"subtitle_channel_id": {"value": self.youtube_id}}
-            }
-        }
-        _, _ = ElasticWrap("ta_subtitle/_delete_by_query").post(data)
+        filter_str = f'subtitle_channel_id = "{self.youtube_id}"'
+        MeiliIndex("ta_subtitle").delete_documents_by_filter(filter_str)
 
     def _delete_playlists(self):
         """delete all indexed playlist from es"""
@@ -363,15 +346,13 @@ class ChannelDelete(YouTubeItem):
 
     def _get_indexed_playlists(self, active_only=False):
         """get all indexed playlists from channel"""
-        must_list = [
-            {"term": {"playlist_channel_id": {"value": self.youtube_id}}}
-        ]
+        filter_str = f'playlist_channel_id = "{self.youtube_id}"'
         if active_only:
-            must_list.append({"term": {"playlist_active": {"value": True}}})
+            filter_str += " AND playlist_active = true"
 
-        data = {"query": {"bool": {"must": must_list}}}
-
-        all_playlists = IndexPaginate("ta_playlist", data).get_results()
+        all_playlists = IndexPaginate(
+            "ta_playlist", {}, filter_str=filter_str
+        ).get_results()
         return all_playlists
 
 

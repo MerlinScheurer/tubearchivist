@@ -163,8 +163,9 @@ class AppConfigApiView(ApiBaseView):
     )
     def get(request):
         """get app config"""
-        response = AppConfig().config
-        serializer = AppConfigSerializer(response)
+        app_config = AppConfig()
+        config = app_config.config or app_config.CONFIG_DEFAULTS
+        serializer = AppConfigSerializer(config)
         return Response(serializer.data)
 
     @staticmethod
@@ -306,11 +307,16 @@ class SnapshotApiListView(ApiBaseView):
         }
     )
     def get(request):
-        """get available snapshots with metadata"""
+        """get available snapshots with metadata — not supported with Meilisearch"""
         # pylint: disable=unused-argument
-        snapshots = ElasticSnapshot().get_snapshot_stats()
-        serializer = SnapshotListSerializer(snapshots)
-        return Response(serializer.data)
+        return Response(
+            {
+                "next_exec": 0,
+                "next_exec_str": "not supported",
+                "expire_after": "not supported",
+                "snapshots": [],
+            }
+        )
 
     @staticmethod
     @extend_schema(
@@ -319,11 +325,12 @@ class SnapshotApiListView(ApiBaseView):
         }
     )
     def post(request):
-        """take snapshot now"""
+        """take snapshot now — not supported with Meilisearch"""
         # pylint: disable=unused-argument
-        response = ElasticSnapshot().take_snapshot_now()
-        serializer = SnapshotCreateResponseSerializer(response)
-        return Response(serializer.data)
+        error = ErrorResponseSerializer(
+            {"error": "snapshots not supported with Meilisearch"}
+        )
+        return Response(error.data, status=400)
 
 
 class RescanFileSystem(ApiBaseView):
@@ -397,16 +404,12 @@ class SnapshotApiView(ApiBaseView):
         }
     )
     def get(request, snapshot_id):
-        """handle get request"""
+        """handle get request — not supported with Meilisearch"""
         # pylint: disable=unused-argument
-        snapshot = ElasticSnapshot().get_single_snapshot(snapshot_id)
-
-        if not snapshot:
-            error = ErrorResponseSerializer({"error": "snapshot not found"})
-            return Response(error.data, status=404)
-
-        serializer = SnapshotItemSerializer(snapshot)
-        return Response(serializer.data)
+        error = ErrorResponseSerializer(
+            {"error": "snapshots not supported with Meilisearch"}
+        )
+        return Response(error.data, status=404)
 
     @staticmethod
     @extend_schema(
@@ -418,18 +421,12 @@ class SnapshotApiView(ApiBaseView):
         }
     )
     def post(request, snapshot_id):
-        """restore snapshot"""
+        """restore snapshot — not supported with Meilisearch"""
         # pylint: disable=unused-argument
-        response = ElasticSnapshot().restore_all(snapshot_id)
-        if not response:
-            error = ErrorResponseSerializer(
-                {"error": "failed to restore snapshot"}
-            )
-            return Response(error.data, status=400)
-
-        serializer = SnapshotRestoreResponseSerializer(response)
-
-        return Response(serializer.data)
+        error = ErrorResponseSerializer(
+            {"error": "snapshots not supported with Meilisearch"}
+        )
+        return Response(error.data, status=400)
 
     @staticmethod
     @extend_schema(
@@ -438,16 +435,12 @@ class SnapshotApiView(ApiBaseView):
         }
     )
     def delete(request, snapshot_id):
-        """delete snapshot from index"""
+        """delete snapshot — not supported with Meilisearch"""
         # pylint: disable=unused-argument
-        response = ElasticSnapshot().delete_single_snapshot(snapshot_id)
-        if not response:
-            error = ErrorResponseSerializer(
-                {"error": "failed to delete snapshot"}
-            )
-            return Response(error.data, status=400)
-
-        return Response(status=204)
+        error = ErrorResponseSerializer(
+            {"error": "snapshots not supported with Meilisearch"}
+        )
+        return Response(error.data, status=400)
 
 
 class TokenView(ApiBaseView):

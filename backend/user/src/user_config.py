@@ -1,12 +1,12 @@
 """
 Functionality:
-- read and write user config backed by ES
+- read and write user config backed by Redis
 - encapsulate persistence of user properties
 """
 
 from typing import TypedDict
 
-from common.src.es_connect import ElasticWrap
+from common.src.ta_redis import RedisArchivist
 
 
 class UserConfigType(TypedDict, total=False):
@@ -34,8 +34,8 @@ class UserConfigType(TypedDict, total=False):
 
 class UserConfig:
     """
-    Handle settings for an individual user
-    items are expected to be validated in the serializer
+    Handle settings for an individual user.
+    Stored in Redis under key  user_config:<user_id>  (persisted to disk).
     """
 
     _DEFAULT_USER_SETTINGS = UserConfigType(
@@ -64,68 +64,78 @@ class UserConfig:
         self._config: UserConfigType = self.get_config()
 
     @property
-    def es_url(self) -> str:
-        """es URL"""
-        return f"ta_config/_doc/user_{self._user_id}"
+    def _redis_key(self) -> str:
+        return f"user_config:{self._user_id}"
 
-    @property
-    def es_update_url(self) -> str:
-        """es update URL"""
-        return f"ta_config/_update/user_{self._user_id}"
+    # ------------------------------------------------------------------
+    # internal helpers
+    # ------------------------------------------------------------------
+
+    def _read(self) -> dict | None:
+        return RedisArchivist().get_message_dict(self._redis_key)
+
+    def _write(self, config: dict) -> None:
+        RedisArchivist().set_message(self._redis_key, config, save=True)
+
+    # ------------------------------------------------------------------
+    # public API
+    # ------------------------------------------------------------------
 
     def get_value(self, key: str):
-        """Get the given key from the users configuration
-        Throws a KeyError if the requested Key is not a permitted value"""
+        """Get the given key from the user's configuration.
+        Raises KeyError if the key is not a permitted value."""
         if key not in self._DEFAULT_USER_SETTINGS:
             raise KeyError(f"Unable to read config for unknown key '{key}'")
-
         return self._config.get(key)
 
-    def set_value(self, key: str, value: str | bool | int):
-        """Set or replace a configuration value for the user"""
-        data = {"doc": {"config": {key: value}}}
-        response, status = ElasticWrap(self.es_update_url).post(data)
-        if status < 200 or status > 299:
-            raise ValueError(f"Failed storing user value {status}: {response}")
-
+    def set_value(self, key: str, value: str | bool | int) -> None:
+        """Set or replace a single configuration value for the user."""
+        if key not in self._DEFAULT_USER_SETTINGS:
+            raise KeyError(f"Unable to set config for unknown key '{key}'")
+        config = dict(self._config)
+        config[key] = value
+        self._write(config)
+        self._config = config  # type: ignore
         print(f"User {self._user_id} value '{key}' change: to {value}")
 
     def get_config(self) -> UserConfigType:
-        """get config from ES or load from the application defaults"""
+        """Return config from Redis, writing defaults on first access."""
         if not self._user_id:
             raise ValueError("no user_id passed")
 
-        response, status = ElasticWrap(self.es_url).get(print_error=False)
-        if status == 404:
+        stored = self._read()
+        if not stored:
             self.sync_defaults()
-            config = self._DEFAULT_USER_SETTINGS
-        else:
-            config = self.sync_new_defaults(response["_source"]["config"])
+            return self._DEFAULT_USER_SETTINGS
 
-        return config
+        return self.sync_new_defaults(stored)  # type: ignore
 
     def update_config(self, to_update: dict) -> None:
-        """update config object"""
-        data = {"doc": {"config": to_update}}
-        response, status = ElasticWrap(self.es_update_url).post(data)
-        if status < 200 or status > 299:
-            raise ValueError(f"Failed storing user value {status}: {response}")
-
+        """Merge partial update dict into stored config."""
+        config = dict(self._config)
+        config.update(to_update)
+        self._write(config)
+        self._config = config  # type: ignore
         for key, value in to_update.items():
             print(f"User {self._user_id} value '{key}' change: to {value}")
 
-    def sync_defaults(self):
-        """set initial defaults on 404"""
-        response, _ = ElasticWrap(self.es_url).post(
-            {"config": self._DEFAULT_USER_SETTINGS}
-        )
-        print(f"set default config for user {self._user_id}: {response}")
+    def sync_defaults(self) -> None:
+        """Write initial defaults for a new user."""
+        self._write(dict(self._DEFAULT_USER_SETTINGS))
+        print(f"set default config for user {self._user_id}")
 
-    def sync_new_defaults(self, config):
-        """sync new defaults"""
+    def sync_new_defaults(self, config: dict) -> UserConfigType:
+        """Add any keys present in defaults but missing from stored config."""
+        changed = False
         for key, value in self._DEFAULT_USER_SETTINGS.items():
             if key not in config:
-                self.set_value(key, value)
-                config.update({key: value})
+                config[key] = value
+                changed = True
+                print(
+                    f"User {self._user_id} added new default '{key}': {value}"
+                )
 
-        return config
+        if changed:
+            self._write(config)
+
+        return config  # type: ignore

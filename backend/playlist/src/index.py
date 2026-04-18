@@ -4,11 +4,10 @@ functionality:
 - index and update in es
 """
 
-import json
 from datetime import datetime
 
 from common.src.env_settings import EnvironmentSettings
-from common.src.es_connect import ElasticWrap, IndexPaginate
+from common.src.es_connect import IndexPaginate, MeiliIndex
 from common.src.index_generic import YouTubeItem
 from download.src.thumbnails import ThumbManager
 from video.src import index as ta_video
@@ -99,26 +98,25 @@ class YoutubePlaylist(YouTubeItem):
 
     def get_playlist_videos(self):
         """get all playlist videos"""
-        data = {
-            "query": {
-                "term": {"playlist.keyword": {"value": self.youtube_id}}
-            },
-            "_source": ["youtube_id"],
-        }
-        result = IndexPaginate("ta_video", data).get_results()
-
+        filter_str = f'playlist = "{self.youtube_id}"'
+        result = IndexPaginate(
+            "ta_video", {}, filter_str=filter_str
+        ).get_results()
         return result
 
     def get_local_vids(self) -> list[str]:
         """get local video ids from youtube entries"""
         entries = self.youtube_meta["entries"]
-        data = {
-            "query": {"terms": {"youtube_id": [i["id"] for i in entries]}},
-            "_source": ["youtube_id"],
-        }
-        indexed_vids = IndexPaginate("ta_video", data).get_results()
+        ids = [i["id"] for i in entries]
+        if not ids:
+            return []
+        # Meilisearch IN filter: field IN [id1, id2, ...]
+        ids_str = ", ".join(f'"{i}"' for i in ids)
+        filter_str = f"youtube_id IN [{ids_str}]"
+        indexed_vids = IndexPaginate(
+            "ta_video", {}, filter_str=filter_str
+        ).get_results()
         ids_found = [i["youtube_id"] for i in indexed_vids]
-
         return ids_found
 
     def get_entries(self, ids_found) -> None:
@@ -150,64 +148,71 @@ class YoutubePlaylist(YouTubeItem):
 
     def add_vids_to_playlist(self):
         """sync the playlist id to videos"""
-        script = (
-            'if (!ctx._source.containsKey("playlist")) '
-            + "{ctx._source.playlist = [params.playlist]} "
-            + "else if (!ctx._source.playlist.contains(params.playlist)) "
-            + "{ctx._source.playlist.add(params.playlist)} "
-            + "else {ctx.op = 'none'}"
-        )
+        video_ids = [
+            entry["youtube_id"] for entry in self.json_data["playlist_entries"]
+        ]
+        if not video_ids:
+            return
 
-        bulk_list = []
-        for entry in self.json_data["playlist_entries"]:
-            video_id = entry["youtube_id"]
-            action = {"update": {"_id": video_id, "_index": "ta_video"}}
-            source = {
-                "script": {
-                    "source": script,
-                    "lang": "painless",
-                    "params": {"playlist": self.youtube_id},
-                }
-            }
-            bulk_list.append(json.dumps(action))
-            bulk_list.append(json.dumps(source))
+        ids_str = ", ".join(f'"{i}"' for i in video_ids)
+        filter_str = f"youtube_id IN [{ids_str}]"
+        videos = IndexPaginate(
+            "ta_video", {}, filter_str=filter_str
+        ).get_results()
 
-        # add last newline
-        bulk_list.append("\n")
-        query_str = "\n".join(bulk_list)
+        updated = []
+        for video in videos:
+            playlist_list = video.get("playlist") or []
+            if self.youtube_id not in playlist_list:
+                playlist_list.append(self.youtube_id)
+                video["playlist"] = playlist_list
+                updated.append(video)
 
-        ElasticWrap("_bulk").post(query_str, ndjson=True)
+        if updated:
+            MeiliIndex("ta_video").add_documents(updated)
 
     def remove_vids_from_playlist(self):
         """remove playlist ids from videos if needed"""
-        needed = [i["youtube_id"] for i in self.json_data["playlist_entries"]]
+        needed = {i["youtube_id"] for i in self.json_data["playlist_entries"]}
         result = self.get_playlist_videos()
         to_remove = [
             i["youtube_id"] for i in result if i["youtube_id"] not in needed
         ]
-        s = "ctx._source.playlist.removeAll(Collections.singleton(params.rm))"
-        for video_id in to_remove:
-            query = {
-                "script": {
-                    "source": s,
-                    "lang": "painless",
-                    "params": {"rm": self.youtube_id},
-                },
-                "query": {"match": {"youtube_id": video_id}},
-            }
-            path = "ta_video/_update_by_query"
-            _, status_code = ElasticWrap(path).post(query)
-            if status_code == 200:
-                print(f"{self.youtube_id}: removed {video_id} from playlist")
+        if not to_remove:
+            return
+
+        ids_str = ", ".join(f'"{i}"' for i in to_remove)
+        filter_str = f"youtube_id IN [{ids_str}]"
+        videos = IndexPaginate(
+            "ta_video", {}, filter_str=filter_str
+        ).get_results()
+
+        updated = []
+        for video in videos:
+            playlist_list = video.get("playlist") or []
+            if self.youtube_id in playlist_list:
+                playlist_list.remove(self.youtube_id)
+                video["playlist"] = playlist_list
+                updated.append(video)
+                print(
+                    f"{self.youtube_id}: removed {video['youtube_id']} from playlist"
+                )
+
+        if updated:
+            MeiliIndex("ta_video").add_documents(updated)
 
     def match_local(self):
         """match local videos as indexed"""
         ids = [i["youtube_id"] for i in self.json_data["playlist_entries"]]
-        data = {
-            "query": {"terms": {"youtube_id": ids}},
-            "_source": ["youtube_id", "title", "channel.channel_name"],
-        }
-        local_vids = IndexPaginate("ta_video", data).get_results()
+        if not ids:
+            self.upload_to_es()
+            return
+
+        ids_str = ", ".join(f'"{i}"' for i in ids)
+        filter_str = f"youtube_id IN [{ids_str}]"
+        local_vids = IndexPaginate(
+            "ta_video", {}, filter_str=filter_str
+        ).get_results()
         indexed_vids = {i["youtube_id"]: i for i in local_vids}
 
         new_entries = []
@@ -296,21 +301,23 @@ class YoutubePlaylist(YouTubeItem):
     def delete_metadata(self):
         """delete metadata for playlist"""
         self.delete_videos_metadata()
-        script = (
-            "ctx._source.playlist.removeAll("
-            + "Collections.singleton(params.playlist)) "
-        )
-        data = {
-            "query": {
-                "term": {"playlist.keyword": {"value": self.youtube_id}}
-            },
-            "script": {
-                "source": script,
-                "lang": "painless",
-                "params": {"playlist": self.youtube_id},
-            },
-        }
-        _, _ = ElasticWrap("ta_video/_update_by_query").post(data)
+        # remove playlist id from all videos that still reference it
+        filter_str = f'playlist = "{self.youtube_id}"'
+        videos = IndexPaginate(
+            "ta_video", {}, filter_str=filter_str
+        ).get_results()
+
+        updated = []
+        for video in videos:
+            playlist_list = video.get("playlist") or []
+            if self.youtube_id in playlist_list:
+                playlist_list.remove(self.youtube_id)
+                video["playlist"] = playlist_list
+                updated.append(video)
+
+        if updated:
+            MeiliIndex("ta_video").add_documents(updated)
+
         self.del_in_es()
 
     def is_custom_playlist(self):

@@ -42,48 +42,37 @@ class DownloadApiListView(ApiBaseView):
     )
     def get(self, request):
         """get download queue list"""
-        query_filter = request.GET.get("filter", False)
-        self.data.update(
-            {
-                "sort": [
-                    {"auto_start": {"order": "desc"}},
-                    {"timestamp": {"order": "asc"}},
-                ],
-            }
-        )
+        self.data["sort"] = ["auto_start:desc", "timestamp:asc"]
 
         serializer = DownloadListQuerySerializer(data=request.query_params)
         serializer.is_valid(raise_exception=True)
         validated_data = serializer.validated_data
 
-        must_list = []
+        filters = []
         query_filter = validated_data.get("filter")
         if query_filter:
-            must_list.append({"term": {"status": {"value": query_filter}}})
+            filters.append(f"status = {query_filter!r}")
 
         filter_channel = validated_data.get("channel")
         if filter_channel:
-            must_list.append(
-                {"term": {"channel_id": {"value": filter_channel}}}
-            )
+            filters.append(f"channel_id = {filter_channel!r}")
 
         vid_type_filter = validated_data.get("vid_type")
         if vid_type_filter:
-            must_list.append(
-                {"term": {"vid_type": {"value": vid_type_filter}}}
-            )
+            filters.append(f"vid_type = {vid_type_filter!r}")
 
         search_query = validated_data.get("q")
         if search_query:
-            must_list.append({"match_phrase_prefix": {"title": search_query}})
+            self.data["q"] = search_query
 
         if validated_data.get("error") is not None:
-            operator = "must" if validated_data["error"] else "must_not"
-            must_list.append(
-                {"bool": {operator: [{"exists": {"field": "message"}}]}}
-            )
+            if validated_data["error"]:
+                filters.append("message EXISTS")
+            else:
+                filters.append("message NOT EXISTS")
 
-        self.data["query"] = {"bool": {"must": must_list}}
+        if filters:
+            self.data["filter"] = " AND ".join(filters)
 
         self.get_document_list(request)
         serializer = DownloadListSerializer(self.response)
@@ -317,6 +306,10 @@ class DownloadAggsApiView(ApiBaseView):
     )
     def get(self, request):
         """get aggs"""
+        from collections import defaultdict
+
+        from common.src.es_connect import IndexPaginate
+
         serializer = DownloadListQueueDeleteQuerySerializer(
             data=request.query_params
         )
@@ -329,29 +322,35 @@ class DownloadAggsApiView(ApiBaseView):
                 message = f"invalid filter: {filter_view}"
                 return Response({"message": message}, status=400)
 
-            self.data.update(
-                {
-                    "query": {"term": {"status": {"value": filter_view}}},
-                }
-            )
+        filter_str = f"status = {filter_view!r}" if filter_view else None
+        docs = IndexPaginate(
+            "ta_download", {}, filter_str=filter_str
+        ).get_results()
 
-        self.data.update(
-            {
-                "aggs": {
-                    "channel_downloads": {
-                        "multi_terms": {
-                            "size": 30,
-                            "terms": [
-                                {"field": "channel_name.keyword"},
-                                {"field": "channel_id"},
-                            ],
-                            "order": {"_count": "desc"},
-                        }
-                    }
+        # aggregate: count per (channel_name, channel_id) pair
+        counts: dict[tuple, int] = defaultdict(int)
+        for doc in docs:
+            key = (doc.get("channel_name", ""), doc.get("channel_id", ""))
+            counts[key] += 1
+
+        buckets = sorted(
+            [
+                {
+                    "key": list(k),
+                    "key_as_string": "|".join(k),
+                    "doc_count": v,
                 }
-            }
-        )
-        self.get_aggs()
-        serializer = DownloadAggsSerializer(self.response["channel_downloads"])
+                for k, v in counts.items()
+            ],
+            key=lambda b: b["doc_count"],
+            reverse=True,
+        )[:30]
+
+        agg_result = {
+            "doc_count_error_upper_bound": 0,
+            "sum_other_doc_count": max(0, len(counts) - 30),
+            "buckets": buckets,
+        }
+        serializer = DownloadAggsSerializer(agg_result)
 
         return Response(serializer.data)

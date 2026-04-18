@@ -215,8 +215,10 @@ class TaskRedis(RedisBase):
         all_keys = self.conn.execute_command("KEYS", f"{self.BASE}*")
         return [i.replace(self.BASE, "") for i in all_keys]
 
-    def get_single(self, task_id: str) -> dict:
+    def get_single(self, task_id: str | None) -> dict:
         """return content of single task"""
+        if not task_id:
+            return {}
         result = self.conn.execute_command("GET", self.BASE + task_id)
         if not result:
             return {}

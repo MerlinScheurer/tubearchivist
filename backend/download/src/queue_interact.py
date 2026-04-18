@@ -1,6 +1,6 @@
 """interact with queue items"""
 
-from common.src.es_connect import ElasticWrap
+from common.src.es_connect import IndexPaginate, MeiliIndex
 
 
 class PendingInteract:
@@ -12,22 +12,18 @@ class PendingInteract:
 
     def delete_item(self):
         """delete single item from pending"""
-        path = f"ta_download/_doc/{self.youtube_id}"
-        _, _ = ElasticWrap(path).delete(refresh=True)
+        MeiliIndex("ta_download").delete_document(self.youtube_id)
 
     def delete_bulk(self, channel_id: str | None, vid_type: str | None):
-        """delete all matching item by status"""
-        must_list = [{"term": {"status": {"value": self.status}}}]
+        """delete all matching items by status"""
+        filter_parts = [f'status = "{self.status}"']
         if channel_id:
-            must_list.append({"term": {"channel_id": {"value": channel_id}}})
-
+            filter_parts.append(f'channel_id = "{channel_id}"')
         if vid_type:
-            must_list.append({"term": {"vid_type": {"value": vid_type}}})
+            filter_parts.append(f'vid_type = "{vid_type}"')
 
-        data = {"query": {"bool": {"must": must_list}}}
-
-        path = "ta_download/_delete_by_query?refresh=true"
-        _, _ = ElasticWrap(path).post(data=data)
+        filter_str = " AND ".join(filter_parts)
+        MeiliIndex("ta_download").delete_documents_by_filter(filter_str)
 
     def update_bulk(
         self,
@@ -36,78 +32,77 @@ class PendingInteract:
         new_status: str,
         error: bool | None = None,
     ):
-        """update status in bulk"""
-        must_list = [{"term": {"status": {"value": self.status}}}]
-        must_not_list = []
-
+        """update status in bulk — fetch matching docs then re-index"""
+        filter_parts = [f'status = "{self.status}"']
         if channel_id:
-            must_list.append({"term": {"channel_id": {"value": channel_id}}})
-
+            filter_parts.append(f'channel_id = "{channel_id}"')
         if vid_type:
-            must_list.append({"term": {"vid_type": {"value": vid_type}}})
+            filter_parts.append(f'vid_type = "{vid_type}"')
 
-        if error is not None:
-            exists = {"exists": {"field": "message"}}
-            if error:
-                must_list.append(exists)  # type: ignore
+        filter_str = " AND ".join(filter_parts)
+        docs = IndexPaginate(
+            "ta_download", {}, filter_str=filter_str
+        ).get_results()
+
+        updated = []
+        for doc in docs:
+            has_message = bool(doc.get("message"))
+
+            # filter by error presence if requested
+            if error is True and not has_message:
+                continue
+            if error is False and has_message:
+                continue
+
+            if new_status == "priority":
+                doc["status"] = "pending"
+                doc["auto_start"] = True
+                doc["message"] = None
+            elif new_status == "clear_error":
+                doc["message"] = None
             else:
-                must_not_list.append(exists)
+                doc["status"] = new_status
 
-        if new_status == "priority":
-            source = """
-            ctx._source.status = 'pending';
-            ctx._source.auto_start = true;
-            ctx._source.message = null;
-            """
-        elif new_status == "clear_error":
-            source = "ctx._source.message = null"
-        else:
-            source = f"ctx._source.status = '{new_status}'"
+            updated.append(doc)
 
-        data = {
-            "query": {"bool": {"must": must_list, "must_not": must_not_list}},
-            "script": {"source": source, "lang": "painless"},
-        }
-
-        path = "ta_download/_update_by_query?refresh=true"
-        _, _ = ElasticWrap(path).post(data)
+        if updated:
+            MeiliIndex("ta_download").add_documents(updated)
 
     def update_status(self):
-        """update status of pending item"""
-        if self.status == "priority":
-            data = {
-                "doc": {
-                    "status": "pending",
-                    "auto_start": True,
-                    "message": None,
-                }
-            }
-        else:
-            data = {"doc": {"status": self.status}}
+        """update status of a single pending item"""
+        doc = MeiliIndex("ta_download").get_document(self.youtube_id)
+        if not doc:
+            return
 
-        path = f"ta_download/_update/{self.youtube_id}/?refresh=true"
-        _, _ = ElasticWrap(path).post(data=data)
+        if self.status == "priority":
+            doc["status"] = "pending"
+            doc["auto_start"] = True
+            doc["message"] = None
+        else:
+            doc["status"] = self.status
+
+        MeiliIndex("ta_download").add_document(doc)
 
     def get_item(self):
         """return pending item dict"""
-        path = f"ta_download/_doc/{self.youtube_id}"
-        response, status_code = ElasticWrap(path).get()
-        return response["_source"], status_code
+        doc = MeiliIndex("ta_download").get_document(self.youtube_id)
+        if doc is None:
+            return None, 404
+        return doc, 200
 
     def get_channel(self):
         """
         get channel metadata from queue to not depend on channel to be indexed
         """
-        data = {
-            "size": 1,
-            "query": {"term": {"channel_id": {"value": self.youtube_id}}},
-        }
-        response, _ = ElasticWrap("ta_download/_search").get(data=data)
-        hits = response["hits"]["hits"]
+        filter_str = f'channel_id = "{self.youtube_id}"'
+        results = MeiliIndex("ta_download").search(
+            "", {"filter": filter_str, "limit": 1}
+        )
+        hits = results.get("hits", [])
         if not hits:
             channel_name = "NA"
         else:
-            channel_name = hits[0]["_source"].get("channel_name", "NA")
+            channel_name = hits[0].get("channel_name", "NA")
 
         return {
             "channel_id": self.youtube_id,

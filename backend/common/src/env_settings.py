@@ -1,6 +1,6 @@
 """
 Functionality:
-- read and write application config backed by ES
+- read and write application config backed by Meilisearch
 - encapsulate persistence of application properties
 """
 
@@ -66,16 +66,11 @@ class EnvironmentSettings:
     REDIS_CON: str = str(environ.get("REDIS_CON"))
     REDIS_NAME_SPACE: str = str(environ.get("REDIS_NAME_SPACE", "ta:"))
 
-    # ElasticSearch
-    ES_URL: str = str(environ.get("ES_URL"))
-    ES_PASS: str = get_password_from_file("ELASTIC_PASSWORD")
-    ES_USER: str = str(environ.get("ELASTIC_USER", "elastic"))
-    ES_SNAPSHOT_DIR: str = str(
-        environ.get(
-            "ES_SNAPSHOT_DIR", "/usr/share/elasticsearch/data/snapshot"
-        )
+    # Meilisearch
+    MEILI_HOST: str = str(
+        environ.get("MEILI_HOST", "http://archivist-meilisearch:7700")
     )
-    ES_DISABLE_VERIFY_SSL: bool = bool(environ.get("ES_DISABLE_VERIFY_SSL"))
+    MEILI_MASTER_KEY: str = get_password_from_file("MEILI_MASTER_KEY")
 
     def get_cache_root(self):
         """get root for web server"""
@@ -116,18 +111,15 @@ class EnvironmentSettings:
             REDIS_CON: {self.REDIS_CON}
             REDIS_NAME_SPACE: {self.REDIS_NAME_SPACE}""")
 
-    def print_es_paths(self):
-        """debug es conf"""
+    def print_meili_conf(self):
+        """debug meilisearch conf"""
         print(f"""
-            ES_URL: {self.ES_URL}
-            ES_PASS: *****
-            ES_USER: {self.ES_USER}
-            ES_SNAPSHOT_DIR: {self.ES_SNAPSHOT_DIR}
-            ES_DISABLE_VERIFY_SSL: {self.ES_DISABLE_VERIFY_SSL}""")
+            MEILI_HOST: {self.MEILI_HOST}
+            MEILI_MASTER_KEY: *****""")
 
     def print_all(self):
         """print all"""
         self.print_generic()
         self.print_paths()
         self.print_redis_conf()
-        self.print_es_paths()
+        self.print_meili_conf()

@@ -1,52 +1,52 @@
-"""build query for playlists"""
+"""build Meilisearch search params for playlists"""
 
 from playlist.src.constants import PlaylistTypesEnum
 
 
 class QueryBuilder:
-    """contain functionality"""
+    """build Meilisearch search params for playlist listing"""
 
     def __init__(self, **kwargs):
         self.request_params = kwargs
 
     def build_data(self) -> dict:
-        """build data dict"""
-        data = {}
-        data["query"] = self.build_query()
-        if sort := self.parse_sort():
-            data.update(sort)
+        """build Meilisearch params dict"""
+        params: dict = {}
 
-        return data
+        filters = self._build_filters()
+        if filters:
+            params["filter"] = " AND ".join(filters)
 
-    def build_query(self) -> dict:
-        """build query key"""
-        must_list = []
+        sort = self._build_sort()
+        if sort:
+            params["sort"] = sort
+
+        return params
+
+    def _build_filters(self) -> list[str]:
+        filters: list[str] = []
+
         channel = self.request_params.get("channel")
         if channel:
-            must_list.append({"match": {"playlist_channel_id": channel}})
+            filters.append(f"playlist_channel_id = {channel!r}")
 
         subscribed = self.request_params.get("subscribed")
         if subscribed is not None:
-            must_list.append({"match": {"playlist_subscribed": subscribed}})
+            val = "true" if subscribed else "false"
+            filters.append(f"playlist_subscribed = {val}")
 
         playlist_type = self.request_params.get("type")
         if playlist_type:
-            type_list = self.parse_type(playlist_type)
-            must_list.append(type_list)
+            filters.append(self._parse_type_filter(playlist_type))
 
-        query = {"bool": {"must": must_list}}
+        return filters
 
-        return query
-
-    def parse_type(self, playlist_type: str) -> dict:
-        """parse playlist type"""
+    def _parse_type_filter(self, playlist_type: str) -> str:
         if not hasattr(PlaylistTypesEnum, playlist_type.upper()):
             raise ValueError(f"'{playlist_type}' not in PlaylistTypesEnum")
 
         type_parsed = getattr(PlaylistTypesEnum, playlist_type.upper()).value
+        return f"playlist_type = {type_parsed!r}"
 
-        return {"match": {"playlist_type": type_parsed}}
-
-    def parse_sort(self) -> dict:
-        """return sort"""
-        return {"sort": [{"playlist_name.keyword": {"order": "asc"}}]}
+    def _build_sort(self) -> list[str]:
+        return ["playlist_name:asc"]

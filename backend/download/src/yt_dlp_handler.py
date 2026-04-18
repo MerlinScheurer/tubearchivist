@@ -13,7 +13,7 @@ from datetime import datetime
 from appsettings.src.config import AppConfig
 from channel.src.index import YoutubeChannel
 from common.src.env_settings import EnvironmentSettings
-from common.src.es_connect import ElasticWrap, IndexPaginate
+from common.src.es_connect import IndexPaginate, MeiliIndex
 from common.src.helper import (
     get_channel_overwrites,
     get_playlists,
@@ -73,14 +73,18 @@ class VideoDownloader(DownloaderBase):
             print(f"{youtube_id}: Downloading video")
             self._notify(video_data, "Validate download format")
 
-            success = self._dl_single_vid(youtube_id, channel_id)
+            success, dl_info_dict = self._dl_single_vid(youtube_id, channel_id)
             if not success:
                 failed += 1
                 continue
 
             self._notify(video_data, "Add video metadata to index", progress=1)
             video_type = VideoTypeEnum(video_data["vid_type"])
-            vid_dict = index_new_video(youtube_id, video_type=video_type)
+            vid_dict = index_new_video(
+                youtube_id,
+                video_type=video_type,
+                youtube_meta_overwrite=dl_info_dict,
+            )
             RedisQueue(self.CHANNEL_QUEUE).add(channel_id)
             RedisQueue(self.VIDEO_QUEUE).add(youtube_id)
 
@@ -107,25 +111,21 @@ class VideoDownloader(DownloaderBase):
 
     def _get_next(self, auto_only):
         """get next item in queue"""
-        must_list = [{"term": {"status": {"value": "pending"}}}]
-        must_not_list = [{"exists": {"field": "message"}}]
+        filters = ["status = 'pending'", "message NOT EXISTS"]
         if auto_only:
-            must_list.append({"term": {"auto_start": {"value": True}}})
+            filters.append("auto_start = true")
 
-        data = {
-            "size": 1,
-            "query": {"bool": {"must": must_list, "must_not": must_not_list}},
-            "sort": [
-                {"auto_start": {"order": "desc"}},
-                {"timestamp": {"order": "asc"}},
-            ],
+        params = {
+            "filter": " AND ".join(filters),
+            "sort": ["auto_start:desc", "timestamp:asc"],
+            "limit": 1,
         }
-        path = "ta_download/_search"
-        response, _ = ElasticWrap(path).get(data=data)
-        if not response["hits"]["hits"]:
+        response = MeiliIndex("ta_download").search("", params)
+        hits = response.get("hits", [])
+        if not hits:
             return False
 
-        return response["hits"]["hits"][0]["_source"]
+        return hits[0]
 
     def _progress_hook(self, response):
         """process the progress_hooks from yt_dlp"""
@@ -204,13 +204,17 @@ class VideoDownloader(DownloaderBase):
         if overwrites and overwrites.get("download_format"):
             obs["format"] = overwrites.get("download_format")
 
-    def _dl_single_vid(self, youtube_id: str, channel_id: str) -> bool:
-        """download single video"""
+    def _dl_single_vid(
+        self, youtube_id: str, channel_id: str
+    ) -> tuple[bool, dict | None]:
+        """download single video; returns (success, info_dict)"""
         obs = self.obs.copy()
         self._set_overwrites(obs, channel_id)
         dl_cache = os.path.join(self.CACHE_DIR, "download")
 
-        success, message = YtWrap(obs, self.config).download(youtube_id)
+        success, message, info_dict = YtWrap(obs, self.config).download(
+            youtube_id
+        )
         if not success:
             self._handle_error(youtube_id, message)
 
@@ -222,13 +226,16 @@ class VideoDownloader(DownloaderBase):
                 file_path = os.path.join(dl_cache, file_name)
                 os.remove(file_path)
 
-        return success
+        return success, info_dict
 
     @staticmethod
     def _handle_error(youtube_id, message):
         """store error message"""
-        data = {"doc": {"message": message}}
-        _, _ = ElasticWrap(f"ta_download/_update/{youtube_id}").post(data=data)
+        meili = MeiliIndex("ta_download")
+        doc = meili.get_document(youtube_id)
+        if doc:
+            doc["message"] = message
+            meili.add_document(doc)
 
     def move_to_archive(self, vid_dict):
         """move downloaded video from cache to archive"""
@@ -254,23 +261,22 @@ class VideoDownloader(DownloaderBase):
     @staticmethod
     def _delete_from_pending(youtube_id):
         """delete downloaded video from pending index if its there"""
-        path = f"ta_download/_doc/{youtube_id}?refresh=true"
-        _, _ = ElasticWrap(path).delete()
+        MeiliIndex("ta_download").delete_document(youtube_id)
 
     def _reset_auto(self):
         """reset autostart to defaults after queue stop"""
-        path = "ta_download/_update_by_query"
-        data = {
-            "query": {"term": {"auto_start": {"value": True}}},
-            "script": {
-                "source": "ctx._source.auto_start = false",
-                "lang": "painless",
-            },
-        }
-        response, _ = ElasticWrap(path).post(data=data)
-        updated = response.get("updated")
-        if updated:
-            print(f"[download] reset auto start on {updated} videos.")
+        meili = MeiliIndex("ta_download")
+        docs = IndexPaginate(
+            "ta_download", {}, filter_str="auto_start = true"
+        ).get_results()
+        if not docs:
+            return
+
+        for doc in docs:
+            doc["auto_start"] = False
+
+        meili.add_documents(docs)
+        print(f"[download] reset auto start on {len(docs)} videos.")
 
 
 class DownloadPostProcess(DownloaderBase):
@@ -294,23 +300,15 @@ class DownloadPostProcess(DownloaderBase):
             return
 
         print(f"auto delete older than {autodelete_days} days")
-        now_lte = str(self.now - autodelete_days * 24 * 60 * 60)
+        cutoff = self.now - autodelete_days * 24 * 60 * 60
         channel_overwrite = "channel.channel_overwrites.autodelete_days"
-        data = {
-            "query": {
-                "bool": {
-                    "must": [
-                        {"range": {"player.watched_date": {"lte": now_lte}}},
-                        {"term": {"player.watched": True}},
-                    ],
-                    "must_not": [
-                        {"exists": {"field": channel_overwrite}},
-                    ],
-                }
-            },
-            "sort": [{"player.watched_date": {"order": "asc"}}],
-        }
-        self._auto_delete_watched(data)
+        filter_str = (
+            f"player.watched_date <= {cutoff}"
+            f" AND player.watched = true"
+            f" AND {channel_overwrite} NOT EXISTS"
+        )
+        data = {"sort": ["player.watched_date:asc"]}
+        self._auto_delete_watched(data, filter_str)
 
     def auto_delete_overwrites(self):
         """handle per channel auto delete from overwrites"""
@@ -321,22 +319,22 @@ class DownloadPostProcess(DownloaderBase):
                     continue
 
                 print(f"{channel_id}: delete older than {autodelete_days}d")
-                now_lte = str(self.now - autodelete_days * 24 * 60 * 60)
-                must_list = [
-                    {"range": {"player.watched_date": {"lte": now_lte}}},
-                    {"term": {"channel.channel_id": {"value": channel_id}}},
-                    {"term": {"player.watched": True}},
-                ]
-                data = {
-                    "query": {"bool": {"must": must_list}},
-                    "sort": [{"player.watched_date": {"order": "desc"}}],
-                }
-                self._auto_delete_watched(data)
+                cutoff = self.now - autodelete_days * 24 * 60 * 60
+                filter_str = (
+                    f"player.watched_date <= {cutoff}"
+                    f" AND channel.channel_id = {channel_id!r}"
+                    f" AND player.watched = true"
+                )
+                data = {"sort": ["player.watched_date:desc"]}
+                self._auto_delete_watched(data, filter_str)
 
     @staticmethod
-    def _auto_delete_watched(data) -> None:
+    def _auto_delete_watched(data: dict, filter_str: str) -> None:
         """delete watched videos after x days"""
-        to_delete = IndexPaginate("ta_video", data).get_results()
+        sort = data.get("sort")
+        to_delete = IndexPaginate(
+            "ta_video", {}, filter_str=filter_str
+        ).get_results()
         if not to_delete:
             return
 
@@ -437,14 +435,27 @@ class DownloadPostProcess(DownloaderBase):
     def _add_video_playlists(self):
         """add other playlists for quick sync"""
         all_playlists = RedisQueue(self.PLAYLIST_QUEUE).get_all()
-        must_not = [{"terms": {"playlist_id": all_playlists}}]
         video_ids = RedisQueue(self.VIDEO_QUEUE).get_all()
-        must = [{"terms": {"playlist_entries.youtube_id": video_ids}}]
-        data = {
-            "query": {"bool": {"must_not": must_not, "must": must}},
-            "_source": ["playlist_id"],
-        }
-        playlists = IndexPaginate("ta_playlist", data).get_results()
+
+        if not video_ids:
+            return
+
+        # Build Meilisearch filter: playlists that contain any downloaded video
+        # but are not already queued for a full refresh
+        video_filter = " OR ".join(
+            f"playlist_entries.youtube_id = {vid!r}" for vid in video_ids
+        )
+        filter_parts = [f"({video_filter})"]
+        if all_playlists:
+            exclude = " AND ".join(
+                f"playlist_id != {pid!r}" for pid in all_playlists
+            )
+            filter_parts.append(f"({exclude})")
+
+        filter_str = " AND ".join(filter_parts)
+        playlists = IndexPaginate(
+            "ta_playlist", {}, filter_str=filter_str
+        ).get_results()
         to_add = [i["playlist_id"] for i in playlists]
         RedisQueue(self.PLAYLIST_QUICK).add_list(to_add)
 
